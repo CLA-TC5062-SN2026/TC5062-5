@@ -1,0 +1,2709 @@
+openapi: 3.0.3
+info:
+  title: ReportaYa API
+  version: 1.0.0
+  description: |-
+    Contrato consolidado de la API REST de ReportaYa (FastAPI). Unifica las cuatro propuestas individuales
+    (Medina, Castañeda "Lupus", Arreola y Guerrero) y se deriva de `SRS_equipo.md` v2.0. Cada decisión de
+    diseño está justificada en `analisis_diferencias.md`.
+
+    **Convenciones**
+    - Rutas en inglés, sustantivos en plural, minúsculas y kebab-case. Los campos JSON conservan el vocabulario del dominio (español, camelCase).
+    - Los reportes se identifican por **folio** (`RY-000124`); el resto de los recursos, por UUID.
+    - Autenticación con JWT (`Authorization: Bearer <token>`). La sesión expira a los 30 min de inactividad y la cuenta se bloquea 15 min tras 5 intentos fallidos (RNF-06); durante el bloqueo se responde el mismo 401, para no revelar que la cuenta existe.
+    - Fechas en ISO 8601 con la zona horaria del condominio (configurable; valor inicial `America/Mexico_City`). Los rangos `avisoDesde`/`avisoHasta` son inclusivos por días completos.
+    - Nada se borra (RNF-07): se desactiva, se anula con una entrada nueva o se rechaza con 403 (`DELETE` de reportes y archivos).
+    - Las transiciones de estado son **eventos modelados como subrecursos creados con POST** (`assignments`, `cycles`, `completions`, `closures`, `reopenings`, `cancellations`, `merges`); los 201 incluyen `Location`.
+    - Colecciones paginadas con `page` y `pageSize`; respuesta `{items, pagination}`.
+    - Los PATCH usan `application/merge-patch+json` (RFC 7396). `PUT`/`PATCH`/`DELETE` son idempotentes (`x-idempotent: true`); los POST que crean registros desde la PWA aceptan `Idempotency-Key` y entonces también lo son (RNF-11). Los PATCH/PUT aceptan `If-Match` con el `ETag` del GET (412 si hubo un cambio concurrente).
+
+    **Contrato de errores (SRS 3.0).** Si aplica más de uno, gana el primero: 401 sin sesión, 404 recurso inexistente o no visible según la matriz 2.3, 403 rol sin permiso, 409 transición no permitida desde el estado actual, 422 validación de un dato. `400` se reserva para peticiones que no se pueden interpretar (JSON inválido, tipo de contenido o parámetro con tipo erróneo) y se evalúa después del 401. Un campo que el rol no puede enviar (por ejemplo un Residente que envía `fechaAviso`) responde 403 (RF-04-AC-8). Ninguna respuesta de error modifica datos. Todos los errores usan el esquema `Error`.
+
+    **Extensiones**
+    - `x-acceptance-criteria`: criterios Dado–Cuando–Entonces de `SRS_equipo.md` que el endpoint satisface (probables por API).
+    - `x-ui-acceptance-criteria`: criterios marcados [UI]; el endpoint los soporta pero se prueban en la interfaz.
+    - `x-requirements`: requerimientos RF/RNF cuando el SRS no define un criterio propio para la operación.
+    - `x-roles`: roles autorizados; el backend aplica además la matriz de visibilidad (RNF-05).
+    - `x-idempotent`: la operación es idempotente.
+    - `x-coverage-gaps` (raíz): criterios sin endpoint HTTP propio y cómo se verifican.
+  license:
+    name: Uso académico (curso TC5062)
+servers:
+  - url: https://reportaya.example.com/api/v1
+    description: Producción (único condominio, EX-07)
+  - url: http://localhost:8000/api/v1
+    description: Desarrollo local (Docker Compose)
+security:
+  - bearerAuth: []
+x-coverage-gaps:
+  - criteria: [RF-14-AC-4]
+    gap: La cuenta inicial de Administración se crea con un comando de arranque del despliegue (CLI); exponerlo por HTTP sería una brecha de seguridad. Se prueba con una prueba de integración del comando.
+  - criteria: [RF-22-AC-1, RF-22-AC-2, RF-22-AC-3]
+    gap: La alerta de estancamiento la genera el worker, no una petición. Solo es observable en GET /notifications (Administración) y no existe endpoint que la dispare. Se prueba con el reloj fijado (RNF-10) y ejecutando el worker.
+  - criteria: [RF-11-AC-4]
+    gap: Los 3 reintentos de correo cada 10 minutos los ejecuta el worker; el resultado se observa en GET /email-deliveries.
+  - criteria: [RF-03-AC-5]
+    gap: 'Criterio [UI]: conservar los datos del formulario tras un error. La API solo garantiza el 422 con el nombre del campo.'
+tags:
+  - {name: Autenticación}
+  - {name: Unidades}
+  - {name: Áreas comunes}
+  - {name: Usuarios}
+  - {name: Responsables}
+  - {name: Catálogo}
+  - {name: Reportes}
+  - {name: Flujo de estados}
+  - {name: Seguimiento}
+  - {name: Archivos}
+  - {name: Costos y garantía}
+  - {name: Avisos}
+  - {name: Tablero}
+  - {name: Delegaciones}
+  - {name: Parámetros}
+paths:
+  # ================= Autenticación =================
+  /sessions:
+    post:
+      tags: [Autenticación]
+      summary: Iniciar sesión (crea una sesión y devuelve el JWT)
+      operationId: createSession
+      security: []
+      x-roles: [público]
+      x-acceptance-criteria: [RF-01-AC-1, RF-01-AC-2, RF-02-AC-3]
+      x-idempotent: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Credenciales'}
+      responses:
+        '201':
+          description: Sesión creada, con JWT, rol y, para un Residente, su unidad.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Sesion'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401':
+          description: «Correo o contraseña incorrectos» (sin indicar cuál falló), cuenta desactivada, pendiente de activación o bloqueada temporalmente (RNF-06).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {codigo: CREDENCIALES_INVALIDAS, mensaje: Correo o contraseña incorrectos}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /sessions/current:
+    get:
+      tags: [Autenticación]
+      summary: Datos de la sesión actual (rol y unidad)
+      operationId: getCurrentSession
+      x-roles: [Residente, Vigilancia, Mantenimiento, Administración]
+      x-acceptance-criteria: [RF-01-AC-1]
+      x-idempotent: true
+      responses:
+        '200':
+          description: Sesión vigente.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SesionUsuario'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '500': {$ref: '#/components/responses/ServerError'}
+    delete:
+      tags: [Autenticación]
+      summary: Cerrar sesión (revoca la sesión del servidor)
+      operationId: closeSession
+      x-roles: [Residente, Vigilancia, Mantenimiento, Administración]
+      x-acceptance-criteria: [RF-01-AC-1]
+      x-idempotent: true
+      responses:
+        '204': {description: Sesión cerrada; el JWT deja de ser aceptado.}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /account-activations:
+    post:
+      tags: [Autenticación]
+      summary: Activar la cuenta con el enlace de un solo uso (vence en 72 h)
+      operationId: createAccountActivation
+      security: []
+      x-roles: [público]
+      x-acceptance-criteria: [RF-14-AC-1, RF-14-AC-2]
+      x-idempotent: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TokenPassword'}
+      responses:
+        '204': {description: Cuenta «Activa»; el enlace deja de funcionar.}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '422':
+          description: Enlace vencido («El enlace venció; pida uno nuevo a la Administración»), ya usado o contraseña inválida (mínimo 8 caracteres).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /password-reset-requests:
+    post:
+      tags: [Autenticación]
+      summary: Pedir un enlace de recuperación de contraseña (vence en 1 h)
+      description: Responde igual exista o no el correo, para no revelar qué correos están registrados.
+      operationId: createPasswordResetRequest
+      security: []
+      x-roles: [público]
+      x-acceptance-criteria: [RF-14-AC-3]
+      x-idempotent: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [correo]
+              properties:
+                correo: {type: string, format: email}
+      responses:
+        '202':
+          description: Solicitud aceptada; el correo se envía de forma asíncrona. Respuesta uniforme exista o no el correo.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Message'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /password-resets:
+    post:
+      tags: [Autenticación]
+      summary: Definir una contraseña nueva con el enlace de recuperación
+      operationId: createPasswordReset
+      security: []
+      x-roles: [público]
+      x-acceptance-criteria: [RF-14-AC-3]
+      x-idempotent: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TokenPassword'}
+      responses:
+        '204': {description: Contraseña actualizada; el enlace deja de funcionar.}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+
+  # ================= Unidades =================
+  /units:
+    get:
+      tags: [Unidades]
+      summary: Listar unidades
+      description: Administración recibe todos los datos, incluido el propietario. Vigilancia, que captura reportes de cualquier unidad (RF-04), recibe solo torre, piso, número y etiqueta (RD-07).
+      operationId: listUnits
+      x-roles: [Administración, Vigilancia]
+      x-acceptance-criteria: []
+      x-requirements: [RF-02, RF-04, RF-24]
+      x-idempotent: true
+      parameters:
+        - {name: torre, in: query, schema: {type: string}}
+        - {name: activa, in: query, description: Solo Administración puede pedir `false`., schema: {type: boolean, default: true}}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Página de unidades.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UnitPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/ServerError'}
+    post:
+      tags: [Unidades]
+      summary: Dar de alta una unidad con su propietario
+      operationId: createUnit
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-02-AC-5, RF-02-AC-6]
+      x-idempotent: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UnitCreate'}
+      responses:
+        '201':
+          description: Unidad creada.
+          headers: {Location: {$ref: '#/components/headers/Location'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Unit'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '422':
+          description: Dato faltante («El piso es obligatorio», «El correo del propietario es obligatorio») o unidad repetida.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {codigo: VALIDACION, mensaje: El correo del propietario es obligatorio, errores: [{campo: propietario.correo, mensaje: El correo del propietario es obligatorio}]}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /units/{unitId}:
+    parameters:
+      - {$ref: '#/components/parameters/UnitId'}
+    get:
+      tags: [Unidades]
+      summary: Consultar una unidad
+      operationId: getUnit
+      x-roles: [Administración, Vigilancia]
+      x-acceptance-criteria: []
+      x-requirements: [RF-02, RF-24]
+      x-idempotent: true
+      responses:
+        '200':
+          description: Unidad.
+          headers: {ETag: {$ref: '#/components/headers/ETag'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Unit'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/ServerError'}
+    patch:
+      tags: [Unidades]
+      summary: Editar o desactivar una unidad (no se borra, RNF-07)
+      description: 'Para desactivar se envía `{"activa": false}`.'
+      operationId: updateUnit
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-02-AC-5, RF-02-AC-6]
+      x-idempotent: true
+      parameters:
+        - {$ref: '#/components/parameters/IfMatch'}
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema: {$ref: '#/components/schemas/UnitUpdate'}
+      responses:
+        '200':
+          description: Unidad actualizada.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Unit'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '412': {$ref: '#/components/responses/PreconditionFailed'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+
+  # ================= Áreas comunes =================
+  /common-areas:
+    get:
+      tags: [Áreas comunes]
+      summary: Listar áreas comunes
+      description: Visible para todos los roles autenticados, porque el formulario de RF-03 y RF-04 las ofrece como ubicación.
+      operationId: listCommonAreas
+      x-roles: [Residente, Vigilancia, Mantenimiento, Administración]
+      x-acceptance-criteria: []
+      x-requirements: [RF-02, RF-03]
+      x-idempotent: true
+      parameters:
+        - {name: activa, in: query, description: Solo Administración puede pedir `false`., schema: {type: boolean, default: true}}
+      responses:
+        '200':
+          description: Áreas comunes.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/CommonArea'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '500': {$ref: '#/components/responses/ServerError'}
+    post:
+      tags: [Áreas comunes]
+      summary: Dar de alta un área común
+      operationId: createCommonArea
+      x-roles: [Administración]
+      x-acceptance-criteria: []
+      x-requirements: [RF-02]
+      x-idempotent: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CommonAreaCreate'}
+      responses:
+        '201':
+          description: Área creada.
+          headers: {Location: {$ref: '#/components/headers/Location'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CommonArea'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /common-areas/{areaId}:
+    parameters:
+      - {$ref: '#/components/parameters/AreaId'}
+    get:
+      tags: [Áreas comunes]
+      summary: Consultar un área común
+      operationId: getCommonArea
+      x-roles: [Residente, Vigilancia, Mantenimiento, Administración]
+      x-acceptance-criteria: []
+      x-requirements: [RF-02]
+      x-idempotent: true
+      responses:
+        '200':
+          description: Área común.
+          headers: {ETag: {$ref: '#/components/headers/ETag'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CommonArea'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/ServerError'}
+    patch:
+      tags: [Áreas comunes]
+      summary: Renombrar o desactivar un área común
+      operationId: updateCommonArea
+      x-roles: [Administración]
+      x-acceptance-criteria: []
+      x-requirements: [RF-02]
+      x-idempotent: true
+      parameters:
+        - {$ref: '#/components/parameters/IfMatch'}
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema: {$ref: '#/components/schemas/CommonAreaUpdate'}
+      responses:
+        '200':
+          description: Área actualizada.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CommonArea'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '412': {$ref: '#/components/responses/PreconditionFailed'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+
+  # ================= Usuarios =================
+  /users:
+    get:
+      tags: [Usuarios]
+      summary: Listar usuarios
+      operationId: listUsers
+      x-roles: [Administración]
+      x-acceptance-criteria: []
+      x-requirements: [RF-02]
+      x-idempotent: true
+      parameters:
+        - {name: rol, in: query, schema: {$ref: '#/components/schemas/Rol'}}
+        - {name: estadoCuenta, in: query, schema: {$ref: '#/components/schemas/EstadoCuenta'}}
+        - {name: unidadId, in: query, schema: {type: string, format: uuid}}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Página de usuarios.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UserPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/ServerError'}
+    post:
+      tags: [Usuarios]
+      summary: Dar de alta un usuario con cuenta (Residente, Vigilancia, Mantenimiento o Administración)
+      description: |-
+        El usuario queda «PendienteActivacion» y recibe el enlace de RF-14. Nadie se registra por su cuenta (EX-08).
+        - Residente: requiere `vinculacion` (unidad, ocupación y fecha de inicio).
+        - Mantenimiento: requiere `mantenimiento.tipo`; un `ProveedorExterno` con cuenta requiere además `especialidad` y `telefono`.
+        - Administración: requiere `perfilAdministracion`.
+        Los proveedores externos **sin acceso** se registran en `/external-providers`.
+      operationId: createUser
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-02-AC-1, RF-02-AC-2, RF-02-AC-4, RF-02-AC-8]
+      x-idempotent: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UserCreate'}
+      responses:
+        '201':
+          description: Usuario creado en «PendienteActivacion».
+          headers: {Location: {$ref: '#/components/headers/Location'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/User'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '422':
+          description: Validación («El correo ya está registrado», unidad inexistente, datos de rol faltantes).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {codigo: VALIDACION, mensaje: El correo ya está registrado, errores: [{campo: correo, mensaje: El correo ya está registrado}]}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /users/{userId}:
+    parameters:
+      - {$ref: '#/components/parameters/UserId'}
+    get:
+      tags: [Usuarios]
+      summary: Consultar un usuario
+      operationId: getUser
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-02-AC-1]
+      x-idempotent: true
+      responses:
+        '200':
+          description: Usuario.
+          headers: {ETag: {$ref: '#/components/headers/ETag'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/User'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/ServerError'}
+    patch:
+      tags: [Usuarios]
+      summary: Editar, desactivar o reactivar un usuario
+      description: |-
+        `{"estadoCuenta": "Desactivada"}` desactiva al usuario y revoca sus sesiones: ya no inicia sesión (401), pero sus reportes siguen visibles para la Administración (RF-02-AC-3).
+        `Activa` solo reactiva una cuenta `Desactivada` que ya había sido activada; una cuenta `PendienteActivacion` solo se activa con su enlace (RF-14) y ese cambio responde 409. No hay eliminación de usuarios.
+      operationId: updateUser
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-02-AC-3]
+      x-idempotent: true
+      parameters:
+        - {$ref: '#/components/parameters/IfMatch'}
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema: {$ref: '#/components/schemas/UserUpdate'}
+      responses:
+        '200':
+          description: Usuario actualizado.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/User'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '412': {$ref: '#/components/responses/PreconditionFailed'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /users/{userId}/activation-links:
+    parameters:
+      - {$ref: '#/components/parameters/UserId'}
+    post:
+      tags: [Usuarios]
+      summary: Emitir y enviar un enlace de activación nuevo (72 h)
+      description: Atiende el mensaje de RF-14-AC-2 («pida uno nuevo a la Administración»). Invalida los enlaces anteriores. Solo para usuarios en `PendienteActivacion`.
+      operationId: createActivationLink
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-14-AC-2]
+      x-idempotent: false
+      responses:
+        '202':
+          description: Enlace emitido; el correo se envía de forma asíncrona.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Message'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /users/{userId}/unit-links:
+    parameters:
+      - {$ref: '#/components/parameters/UserId'}
+    get:
+      tags: [Usuarios]
+      summary: Historial de vinculaciones de un Residente a unidades
+      operationId: listUnitLinks
+      x-roles: [Administración]
+      x-acceptance-criteria: []
+      x-requirements: [RF-02, RF-10]
+      x-idempotent: true
+      responses:
+        '200':
+          description: Vinculaciones, de la más reciente a la más antigua.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Vinculacion'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/ServerError'}
+    post:
+      tags: [Usuarios]
+      summary: Vincular un Residente a otra unidad
+      description: Si el residente tiene una vinculación activa, se cierra con `fechaFin`; hay a lo sumo una activa por residente. `fechaInicio` limita qué reportes de la unidad ve el residente (RF-10-AC-4).
+      operationId: createUnitLink
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-10-AC-4]
+      x-idempotent: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/VinculacionCreate'}
+      responses:
+        '201':
+          description: Vinculación creada.
+          headers: {Location: {$ref: '#/components/headers/Location'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Vinculacion'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+
+  # ================= Responsables =================
+  /assignees:
+    get:
+      tags: [Responsables]
+      summary: Listar responsables asignables (usuarios de Mantenimiento y proveedores sin acceso)
+      description: Proyección de lectura, no una entidad del dominio. Al asignar se envía `responsable {tipo, id}` con uno de estos elementos. Los proveedores sin acceso vienen marcados «Sin acceso al sistema».
+      operationId: listAssignees
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-02-AC-4, RF-02-AC-7]
+      x-idempotent: true
+      responses:
+        '200':
+          description: Responsables activos.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/ResponsableRef'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /external-providers:
+    get:
+      tags: [Responsables]
+      summary: Listar proveedores externos sin acceso
+      operationId: listExternalProviders
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-02-AC-7]
+      x-idempotent: true
+      parameters:
+        - {name: activo, in: query, schema: {type: boolean}}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Página de proveedores.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExternalProviderPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/ServerError'}
+    post:
+      tags: [Responsables]
+      summary: Registrar un proveedor externo sin acceso (sin cuenta ni enlace)
+      operationId: createExternalProvider
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-02-AC-7]
+      x-idempotent: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ExternalProviderCreate'}
+      responses:
+        '201':
+          description: Proveedor creado.
+          headers: {Location: {$ref: '#/components/headers/Location'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExternalProvider'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /external-providers/{providerId}:
+    parameters:
+      - {$ref: '#/components/parameters/ProviderId'}
+    get:
+      tags: [Responsables]
+      summary: Consultar un proveedor sin acceso
+      operationId: getExternalProvider
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-02-AC-7]
+      x-idempotent: true
+      responses:
+        '200':
+          description: Proveedor.
+          headers: {ETag: {$ref: '#/components/headers/ETag'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExternalProvider'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/ServerError'}
+    patch:
+      tags: [Responsables]
+      summary: Editar o desactivar un proveedor sin acceso
+      operationId: updateExternalProvider
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-02-AC-7]
+      x-idempotent: true
+      parameters:
+        - {$ref: '#/components/parameters/IfMatch'}
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema: {$ref: '#/components/schemas/ExternalProviderUpdate'}
+      responses:
+        '200':
+          description: Proveedor actualizado.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExternalProvider'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '412': {$ref: '#/components/responses/PreconditionFailed'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+
+  # ================= Catálogo =================
+  /categories:
+    get:
+      tags: [Catálogo]
+      summary: Catálogo de categorías, subtipos y prioridad sugerida (RD-01)
+      operationId: listCategories
+      x-roles: [Residente, Vigilancia, Administración]
+      x-acceptance-criteria: [RF-03-AC-10, RF-06-AC-5, RF-06-AC-6, RF-06-AC-7]
+      x-idempotent: true
+      responses:
+        '200':
+          description: Categorías con subtipos.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Category'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/ServerError'}
+
+  # ================= Reportes =================
+  /reports:
+    get:
+      tags: [Reportes]
+      summary: Listar reportes visibles para el rol; con búsqueda para la Administración
+      description: |-
+        Una sola colección; el alcance lo decide el rol del JWT, no la URL (RNF-05).
+        - **Residente:** reportes de su unidad desde su fecha de vinculación, los que reportó y los de áreas comunes, estos sin datos del reportante (RF-10).
+        - **Vigilancia:** solo los que registró (RF-04-AC-7).
+        - **Mantenimiento:** solo los asignados a él en `Asignado` o `EnProceso`, por prioridad (Urgente, Normal, Menor) y, a igual prioridad, por fecha de aviso ascendente (RF-16). El servidor aplica filtro y orden; el cliente no los elige. Con autorización de acceso «No» incluye `mensajeAcceso`. Debe poder cargarse para consulta sin señal (RNF-11).
+        - **Administración:** todos, por fecha de aviso descendente (RF-12), incluidos cerrados y de usuarios desactivados.
+
+        Los filtros `ubicacionTipo`, `ubicacionId`, `categoriaId`, `estado`, `prioridad`, `responsableId`, `medioOrigen`, `avisoDesde`, `avisoHasta` y `texto` son exclusivos de la Administración y se combinan; cualquier otro rol que los envíe recibe 403 (RF-12-AC-5). El filtro de ubicación coincide con la ubicación observada **o** la de origen (RF-12-AC-2). Los rangos de fecha son inclusivos por días completos.
+      operationId: listReports
+      x-roles: [Residente, Vigilancia, Mantenimiento, Administración]
+      x-acceptance-criteria: [RF-02-AC-3, RF-04-AC-3, RF-04-AC-7, RF-06-AC-1, RF-06-AC-4, RF-10-AC-1, RF-10-AC-4, RF-10-AC-5, RF-10-AC-6, RF-12-AC-1, RF-12-AC-2, RF-12-AC-4, RF-12-AC-5, RF-15-AC-2, RF-16-AC-1, RF-16-AC-2, RF-16-AC-3, RF-16-AC-4]
+      x-idempotent: true
+      parameters:
+        - {name: ubicacionTipo, in: query, description: Se usa junto con `ubicacionId`., schema: {$ref: '#/components/schemas/TipoUbicacion'}}
+        - {name: ubicacionId, in: query, schema: {type: string, format: uuid}}
+        - {name: categoriaId, in: query, schema: {type: string, format: uuid}}
+        - name: estado
+          in: query
+          description: Uno o varios estados separados por coma.
+          style: form
+          explode: false
+          schema:
+            type: array
+            items: {$ref: '#/components/schemas/EstadoReporte'}
+        - {name: prioridad, in: query, schema: {$ref: '#/components/schemas/Prioridad'}}
+        - {name: responsableId, in: query, description: Id de un usuario de Mantenimiento o de un proveedor sin acceso., schema: {type: string, format: uuid}}
+        - {name: medioOrigen, in: query, schema: {$ref: '#/components/schemas/MedioOrigen'}}
+        - {name: avisoDesde, in: query, description: 'Día inicial inclusivo de la fecha de aviso (00:00:00).', schema: {type: string, format: date}}
+        - {name: avisoHasta, in: query, description: 'Día final inclusivo de la fecha de aviso (23:59:59).', schema: {type: string, format: date}}
+        - {name: texto, in: query, description: Texto contenido en la descripción., schema: {type: string, minLength: 1, maxLength: 100}}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Página de reportes visibles para el rol, con los campos que su matriz de visibilidad permite.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/ServerError'}
+    post:
+      tags: [Reportes]
+      summary: Crear un reporte (alta del Residente o captura en nombre de un tercero)
+      description: |-
+        `multipart/form-data` con la parte `datos` (JSON `ReportCreate`), de 0 a 5 `fotos` (JPEG o PNG, máximo 10 MB cada una) y un `video` opcional (MP4, máximo 50 MB).
+
+        El servidor asigna el folio siguiente, fija la fecha de aviso, deja el reporte en `Reportado`, calcula la prioridad sugerida (RD-01; `Urgente` si `esPeligroso`), marca posibles duplicados **sin impedir la creación** (RF-17), genera los avisos de alta (RF-11) y no pide datos del propietario (RF-24).
+
+        - **Residente (RF-03):** medio de origen «Sistema» y fecha de aviso igual a la hora del sistema. Solo puede reportar en su unidad o en un área común. Si envía campos de captura (`medioOrigen`, `fechaAviso`, `residenteReportanteId`, `nombreReferencia`, `contactoReferencia`) recibe 403 (RF-04-AC-8).
+        - **Administración y Vigilancia (RF-04):** `medioOrigen` y `fechaAviso` (no futura) obligatorios; `residenteReportanteId` o, si no hay, `nombreReferencia`. Se guarda siempre quién capturó y la fecha de captura; los tiempos se calculan desde la fecha de aviso.
+        - Cada archivo se valida por separado: los válidos se guardan y los inválidos se informan en `archivosRechazados`. Más de 5 fotos produce 422 y no crea el reporte.
+        - `Idempotency-Key` evita duplicar el reporte cuando la PWA reintenta un envío pendiente (RNF-11).
+      operationId: createReport
+      x-roles: [Residente, Vigilancia, Administración]
+      x-acceptance-criteria: [RF-03-AC-1, RF-03-AC-2, RF-03-AC-3, RF-03-AC-4, RF-03-AC-6, RF-03-AC-7, RF-03-AC-8, RF-03-AC-9, RF-03-AC-10, RF-04-AC-1, RF-04-AC-2, RF-04-AC-3, RF-04-AC-4, RF-04-AC-6, RF-04-AC-8, RF-04-AC-9, RF-05-AC-1, RF-05-AC-2, RF-05-AC-3, RF-05-AC-4, RF-05-AC-5, RF-05-AC-6, RF-06-AC-5, RF-06-AC-6, RF-06-AC-7, RF-11-AC-1, RF-17-AC-1, RF-17-AC-5, RF-17-AC-6, RF-24-AC-1]
+      x-ui-acceptance-criteria: [RF-03-AC-5, RF-03-AC-7]
+      x-idempotent: true
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: {$ref: '#/components/schemas/ReportCreateForm'}
+            encoding:
+              datos: {contentType: application/json}
+              fotos: {contentType: 'image/jpeg, image/png'}
+              video: {contentType: video/mp4}
+      responses:
+        '201':
+          description: Reporte creado en `Reportado`.
+          headers: {Location: {$ref: '#/components/headers/Location'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportCreated'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403':
+          description: El rol no puede crear reportes o un Residente envió campos de captura en nombre de terceros (RF-04-AC-8).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '422':
+          description: |-
+            Validación fallida con el nombre del campo; no se crea el reporte. Ejemplos: «La descripción debe tener entre 10 y 1,000 caracteres»,
+            «Indique si autoriza el acceso a su departamento», «Indique si el problema es peligroso o está empeorando», «Indique el subtipo»,
+            «Solo puede reportar en su unidad o en áreas comunes», «La fecha del aviso no puede ser futura», «Indique el nombre de quien reporta»,
+            «Indique si el ocupante autoriza el acceso», «Máximo 5 fotografías por etapa».
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {codigo: VALIDACION, mensaje: 'La descripción debe tener entre 10 y 1,000 caracteres', errores: [{campo: descripcion, mensaje: 'La descripción debe tener entre 10 y 1,000 caracteres'}]}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /reports/possible-duplicates:
+    get:
+      tags: [Reportes]
+      summary: Consultar posibles duplicados antes de confirmar una captura
+      description: Apoya RF-17, que pide mostrar la advertencia antes de confirmar cuando captura la Administración. Aplica la misma regla que `POST /reports`, es decir reportes abiertos de la misma categoría y la misma ubicación (unidades, mismo piso de la misma torre; áreas comunes, la misma área). La ruta estática se resuelve antes que `/reports/{folio}`.
+      operationId: findPossibleDuplicates
+      x-roles: [Administración]
+      x-acceptance-criteria: []
+      x-requirements: [RF-17, RD-13]
+      x-idempotent: true
+      parameters:
+        - {name: categoriaId, in: query, required: true, schema: {type: string, format: uuid}}
+        - {name: ubicacionTipo, in: query, required: true, schema: {$ref: '#/components/schemas/TipoUbicacion'}}
+        - {name: ubicacionId, in: query, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: Reportes abiertos que serían posibles duplicados (lista vacía si no hay).
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/ReportSummary'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /reports/{folio}:
+    parameters:
+      - {$ref: '#/components/parameters/Folio'}
+    get:
+      tags: [Reportes]
+      summary: Detalle de un reporte, filtrado por la matriz de visibilidad (2.3)
+      description: |-
+        Residente: sin notas, sin monto, sin datos del propietario ni del responsable; en áreas comunes sin el reportante.
+        Mantenimiento: solo asignados; ve autorización y horarios de acceso (si «No», `mensajeAcceso`).
+        Administración: todo, incluidos propietario, capturado por y monto. Fotos y evidencias se agrupan por ciclo.
+        Un reporte no visible para el usuario responde 404.
+      operationId: getReport
+      x-roles: [Residente, Vigilancia, Mantenimiento, Administración]
+      x-acceptance-criteria: [RF-04-AC-5, RF-05-AC-5, RF-08-AC-3, RF-10-AC-2, RF-10-AC-3, RF-10-AC-5, RF-10-AC-6, RF-12-AC-3, RF-15-AC-3, RF-16-AC-4, RF-19-AC-2, RF-20-AC-5, RF-24-AC-2, RF-24-AC-3, RF-25-AC-3]
+      x-idempotent: true
+      responses:
+        '200':
+          description: Detalle.
+          headers: {ETag: {$ref: '#/components/headers/ETag'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportDetail'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/ServerError'}
+    patch:
+      tags: [Reportes]
+      summary: Corregir categoría, subtipo, descripción o ubicación (versión nueva, RNF-07)
+      description: El Residente que lo registró solo puede corregirlo en `Reportado` (desde `Asignado` responde 409); la Administración, en cualquier estado no final. Cada corrección crea una `VersionCorreccion` y conserva la anterior. Si cambian categoría o subtipo, la prioridad sugerida se recalcula. La reclasificación de gestión (prioridad, responsable, responsabilidad) va en `/classification`.
+      operationId: correctReport
+      x-roles: [Residente, Administración]
+      x-acceptance-criteria: [RF-26-AC-1, RF-26-AC-3, RF-26-AC-4, RF-26-AC-5]
+      x-idempotent: true
+      parameters:
+        - {$ref: '#/components/parameters/IfMatch'}
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema: {$ref: '#/components/schemas/ReportCorrection'}
+      responses:
+        '200':
+          description: Reporte corregido.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportDetail'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '412': {$ref: '#/components/responses/PreconditionFailed'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+    delete:
+      tags: [Reportes]
+      summary: Borrar un reporte (siempre rechazado, RNF-07)
+      description: Los reportes no se eliminan. El endpoint deja el rechazo explícito y probable; responde 403 a cualquier rol que vea el reporte.
+      operationId: deleteReportRejected
+      x-roles: [ninguno]
+      x-acceptance-criteria: []
+      x-requirements: [RNF-07]
+      x-idempotent: true
+      responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /reports/{folio}/history:
+    get:
+      tags: [Reportes]
+      summary: Historial completo de solo inserción
+      description: Cambios de estado, reclasificaciones, notas, versiones de corrección, detenciones, costos, confirmaciones, indicaciones de persistencia y constancia de avisos, con autor, fecha y valores anterior y nuevo. Administración ve todo; el Mantenimiento asignado, todo menos costos; el Residente solo los cambios de estado de sus reportes.
+      operationId: getReportHistory
+      x-roles: [Residente, Mantenimiento, Administración]
+      x-acceptance-criteria: [RF-06-AC-1, RF-06-AC-4, RF-06-AC-8, RF-07-AC-1, RF-07-AC-6, RF-07-AC-10, RF-08-AC-7, RF-09-AC-5, RF-12-AC-3, RF-15-AC-1, RF-18-AC-1, RF-18-AC-3, RF-20-AC-4, RF-21-AC-4, RF-26-AC-2]
+      x-idempotent: true
+      parameters:
+        - {$ref: '#/components/parameters/Folio'}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Entradas en orden cronológico.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/HistoryPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/ServerError'}
+
+  # ================= Flujo de estados =================
+  /reports/{folio}/assignments:
+    post:
+      tags: [Flujo de estados]
+      summary: Crear la asignación del reporte (Reportado → Asignado)
+      description: Exige prioridad y responsable (un usuario de Mantenimiento o un proveedor, con o sin acceso). Admite ubicación de origen, responsabilidad (por defecto `PorDeterminar`) y responsable del costo. Avisa al responsable si tiene cuenta y al reportante; si el reportante es «Sin cuenta», el aviso va a la Administración. La Auxiliar solo con delegación vigente.
+      operationId: createAssignment
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-01-AC-3, RF-01-AC-4, RF-06-AC-1, RF-06-AC-2, RF-06-AC-3, RF-06-AC-10, RF-11-AC-2, RF-11-AC-5, RF-11-AC-8, RF-21-AC-1, RF-21-AC-2, RF-21-AC-4, RF-21-AC-5]
+      x-idempotent: false
+      parameters:
+        - {$ref: '#/components/parameters/Folio'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AssignRequest'}
+      responses:
+        '201':
+          description: Reporte en `Asignado`.
+          headers: {Location: {$ref: '#/components/headers/Location'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportDetail'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422':
+          description: Validación («La prioridad es obligatoria»; el responsable no es de Mantenimiento ni proveedor).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {codigo: VALIDACION, mensaje: La prioridad es obligatoria, errores: [{campo: prioridad, mensaje: La prioridad es obligatoria}]}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /reports/{folio}/classification:
+    patch:
+      tags: [Flujo de estados]
+      summary: Reclasificar sin cambiar el estado (prioridad, responsable, origen, responsabilidad, responsable del costo)
+      description: Posible en `Asignado`, `EnProceso` o `Terminado`; el cambio de responsable solo en `Asignado` o `EnProceso`. Cada cambio registra valor anterior y nuevo. La prioridad final es de la Administración y nunca se revierte a la sugerida (RD-10). Reclasificar la responsabilidad avisa al reportante. La Auxiliar solo con delegación vigente.
+      operationId: reclassifyReport
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-06-AC-2, RF-06-AC-4, RF-06-AC-8, RF-06-AC-9, RF-21-AC-3]
+      x-idempotent: true
+      parameters:
+        - {$ref: '#/components/parameters/Folio'}
+        - {$ref: '#/components/parameters/IfMatch'}
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema: {$ref: '#/components/schemas/ReclassifyRequest'}
+      responses:
+        '200':
+          description: Reporte reclasificado.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportDetail'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '412': {$ref: '#/components/responses/PreconditionFailed'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /reports/{folio}/cycles:
+    post:
+      tags: [Flujo de estados]
+      summary: Iniciar un ciclo de atención (Asignado → EnProceso)
+      description: Lo hace el Mantenimiento asignado o la Administración. Para un proveedor sin acceso, la Administración lo registra en su nombre y el historial guarda ambos. No se avisa al residente (RF-11).
+      operationId: createCycle
+      x-roles: [Mantenimiento, Administración]
+      x-acceptance-criteria: [RF-07-AC-1, RF-07-AC-3, RF-07-AC-4, RF-07-AC-10, RF-11-AC-7]
+      x-idempotent: true
+      parameters:
+        - {$ref: '#/components/parameters/Folio'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/StartRequest'}
+      responses:
+        '201':
+          description: Reporte `EnProceso`; inicia el ciclo de atención.
+          headers: {Location: {$ref: '#/components/headers/Location'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportDetail'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /reports/{folio}/completions:
+    post:
+      tags: [Flujo de estados]
+      summary: Registrar la terminación con evidencia (EnProceso → Terminado)
+      description: |-
+        `multipart/form-data` con la parte opcional `datos` (JSON `CompletionData`) y de 1 a 5 `fotos` de evidencia del ciclo actual (JPEG o PNG, 10 MB). La nota de trabajo es opcional (hasta 1,000 caracteres).
+        **Excepción RD-09:** si el responsable es un proveedor sin acceso y registra la Administración, puede omitir las fotos con `justificacionSinEvidencia`; queda marcado «Terminado sin evidencia fotográfica». La excepción no aplica al personal propio.
+        Admite `garantiaVencimiento` (RF-25) y `pendientes` (descripción de lo que falta si solo se atendió lo urgente). Abre el plazo de confirmación del residente (72 h, RF-27). Terminado nunca cierra el reporte.
+      operationId: createCompletion
+      x-roles: [Mantenimiento, Administración]
+      x-acceptance-criteria: [RF-07-AC-2, RF-08-AC-1, RF-08-AC-2, RF-08-AC-3, RF-08-AC-4, RF-08-AC-5, RF-08-AC-6, RF-08-AC-7, RF-11-AC-9, RF-25-AC-1, RF-25-AC-2, RF-27-AC-4]
+      x-idempotent: true
+      parameters:
+        - {$ref: '#/components/parameters/Folio'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: {$ref: '#/components/schemas/CompletionForm'}
+            encoding:
+              datos: {contentType: application/json}
+              fotos: {contentType: 'image/jpeg, image/png'}
+      responses:
+        '201':
+          description: Reporte `Terminado`.
+          headers: {Location: {$ref: '#/components/headers/Location'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CompletionResult'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '422':
+          description: «Adjunte al menos una foto del trabajo terminado», «Escriba la justificación», «La fecha de vencimiento no puede ser pasada», «Máximo 5 fotografías por etapa».
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /reports/{folio}/resident-responses:
+    post:
+      tags: [Flujo de estados]
+      summary: Registrar la respuesta del residente («Ya quedó» o «Sigue fallando»), una vez por ciclo
+      description: Solo el residente reportante, con el reporte en `Terminado` y dentro del plazo configurable (72 h iniciales, RF-27). «Sigue fallando» exige comentario.
+      operationId: createResidentResponse
+      x-roles: [Residente]
+      x-acceptance-criteria: [RF-09-AC-1, RF-09-AC-3]
+      x-idempotent: true
+      parameters:
+        - {$ref: '#/components/parameters/Folio'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ResidentResponseCreate'}
+      responses:
+        '201':
+          description: Respuesta registrada en el ciclo actual.
+          headers: {Location: {$ref: '#/components/headers/Location'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Confirmacion'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409':
+          description: Plazo vencido («El plazo para responder terminó»), ya respondió en este ciclo o el reporte no está `Terminado`.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {codigo: PLAZO_VENCIDO, mensaje: El plazo para responder terminó}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /reports/{folio}/closures:
+    post:
+      tags: [Flujo de estados]
+      summary: Registrar el cierre (Terminado → Cerrado)
+      description: Solo la Administración (la Auxiliar con delegación; el Mantenimiento y el residente reciben 403). Permitido si el residente respondió «Ya quedó», pasó el plazo sin respuesta, la ubicación es un área común o no hay residente reportante con cuenta. Si respondió «Sigue fallando» exige comentario. Avisa a los residentes de los reportes unidos al principal.
+      operationId: createClosure
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-01-AC-4, RF-09-AC-1, RF-09-AC-2, RF-09-AC-4, RF-09-AC-6, RF-09-AC-7, RF-09-AC-8, RF-09-AC-9, RF-17-AC-4, RF-21-AC-1, RF-21-AC-2, RF-21-AC-3, RF-21-AC-5]
+      x-idempotent: false
+      parameters:
+        - {$ref: '#/components/parameters/Folio'}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CloseRequest'}
+      responses:
+        '201':
+          description: Reporte `Cerrado`.
+          headers: {Location: {$ref: '#/components/headers/Location'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportDetail'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409':
+          description: Transición no permitida o «Esperando confirmación del residente hasta el dd/mm/aaaa hh:mm».
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {codigo: ESPERANDO_CONFIRMACION, mensaje: Esperando confirmación del residente hasta el 25/09/2026 10:00}
+        '422':
+          description: «Escriba el motivo del cierre».
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /reports/{folio}/reopenings:
+    post:
+      tags: [Flujo de estados]
+      summary: Registrar una reapertura (Terminado o Cerrado → EnProceso, ciclo nuevo, mismo folio)
+      description: Solo la Administración, con comentario obligatorio. Conserva folio e historial e inicia un ciclo nuevo; no crea un reporte nuevo. Desde `Cerrado`, solo dentro del plazo de RF-19.
+      operationId: createReopening
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-09-AC-5, RF-19-AC-3, RF-19-AC-5]
+      x-idempotent: false
+      parameters:
+        - {$ref: '#/components/parameters/Folio'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CommentRequest'}
+      responses:
+        '201':
+          description: Reporte `EnProceso` con ciclo nuevo; el historial se conserva.
+          headers: {Location: {$ref: '#/components/headers/Location'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportDetail'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422':
+          description: «Escriba el motivo de la reapertura».
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /reports/{folio}/cancellations:
+    post:
+      tags: [Flujo de estados]
+      summary: Registrar la cancelación (Reportado o Asignado → Cancelado)
+      description: La Administración con motivo obligatorio; el Residente que lo registró solo con el motivo fijo «Ya se resolvió». `EnProceso` no se cancela. `Cancelado` y `Unido` son estados finales (409).
+      operationId: createCancellation
+      x-roles: [Residente, Administración]
+      x-acceptance-criteria: [RF-07-AC-3, RF-07-AC-5, RF-07-AC-6, RF-07-AC-7, RF-07-AC-8, RF-07-AC-9, RF-11-AC-6]
+      x-idempotent: false
+      parameters:
+        - {$ref: '#/components/parameters/Folio'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CancelRequest'}
+      responses:
+        '201':
+          description: Reporte `Cancelado`; si cancela el residente se avisa a la Administración y al responsable.
+          headers: {Location: {$ref: '#/components/headers/Location'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportDetail'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422':
+          description: «El motivo es obligatorio» o «Solo puede cancelar un reporte que ya se resolvió».
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /reports/{folio}/merges:
+    post:
+      tags: [Flujo de estados]
+      summary: Registrar la unión de un duplicado al reporte original (→ Unido)
+      description: Solo el reporte más reciente, en `Reportado` o `Asignado`, pasa a `Unido`. Ambos historiales se conservan y se avisa a los residentes.
+      operationId: createMerge
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-17-AC-3, RF-17-AC-4]
+      x-idempotent: false
+      parameters:
+        - {$ref: '#/components/parameters/Folio'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reportePrincipal]
+              properties:
+                reportePrincipal: {$ref: '#/components/schemas/Folio'}
+      responses:
+        '201':
+          description: Reporte `Unido`, enlazado al principal.
+          headers: {Location: {$ref: '#/components/headers/Location'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportDetail'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /reports/{folio}/duplicate-flag:
+    parameters:
+      - {$ref: '#/components/parameters/Folio'}
+    delete:
+      tags: [Flujo de estados]
+      summary: Retirar la marca de posible duplicado (confirmar que es un caso independiente)
+      description: Ambos reportes siguen su flujo por separado. Idempotente, de modo que si la marca ya no existe también responde 204. El retiro queda en el historial (RNF-07).
+      operationId: deleteDuplicateFlag
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-17-AC-2]
+      x-idempotent: true
+      responses:
+        '204': {description: Marca retirada.}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /reports/{folio}/persistence-indications:
+    parameters:
+      - {$ref: '#/components/parameters/Folio'}
+    get:
+      tags: [Flujo de estados]
+      summary: Consultar las indicaciones de que el problema persiste
+      operationId: listPersistenceIndications
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-19-AC-1]
+      x-idempotent: true
+      responses:
+        '200':
+          description: Indicaciones registradas.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/IndicacionPersistencia'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/ServerError'}
+    post:
+      tags: [Flujo de estados]
+      summary: El residente indica que el problema persiste en un reporte Cerrado (≤ 30 días)
+      description: No reabre el reporte; la Administración decide con `/reopenings`.
+      operationId: createPersistenceIndication
+      x-roles: [Residente]
+      x-acceptance-criteria: [RF-19-AC-1, RF-19-AC-2, RF-19-AC-4]
+      x-idempotent: true
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                comentario: {type: string, maxLength: 1000}
+      responses:
+        '201':
+          description: Indicación registrada; el reporte sigue `Cerrado`.
+          headers: {Location: {$ref: '#/components/headers/Location'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/IndicacionPersistencia'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409':
+          description: «El plazo para reabrir terminó» o el reporte no está `Cerrado`.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {codigo: PLAZO_VENCIDO, mensaje: El plazo para reabrir terminó}
+        '500': {$ref: '#/components/responses/ServerError'}
+
+  # ================= Seguimiento =================
+  /reports/{folio}/notes:
+    parameters:
+      - {$ref: '#/components/parameters/Folio'}
+    get:
+      tags: [Seguimiento]
+      summary: Notas de avance internas
+      description: Solo Administración y el Mantenimiento asignado. Para un Residente o Vigilancia las notas no son visibles según la matriz 2.3 y responde 404.
+      operationId: listNotes
+      x-roles: [Mantenimiento, Administración]
+      x-acceptance-criteria: [RF-15-AC-1, RF-15-AC-3]
+      x-idempotent: true
+      responses:
+        '200':
+          description: Notas, de la más antigua a la más reciente.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Note'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/ServerError'}
+    post:
+      tags: [Seguimiento]
+      summary: Agregar una nota de avance (solo inserción, no cambia el estado)
+      description: En `Asignado` o `EnProceso`. No avisa al residente (RF-11).
+      operationId: createNote
+      x-roles: [Mantenimiento, Administración]
+      x-acceptance-criteria: [RF-15-AC-1, RF-11-AC-7]
+      x-idempotent: true
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [texto]
+              properties:
+                texto: {type: string, minLength: 1, maxLength: 500, example: Falta la pieza; llega el jueves}
+      responses:
+        '201':
+          description: Nota creada con autor y fecha.
+          headers: {Location: {$ref: '#/components/headers/Location'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Note'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /reports/{folio}/visit:
+    parameters:
+      - {$ref: '#/components/parameters/Folio'}
+    put:
+      tags: [Seguimiento]
+      summary: Fijar o cambiar la fecha programada de visita
+      description: En `Asignado` o `EnProceso`. Visible para el residente, los residentes de la unidad y el propietario (en el correo). La fecha no puede ser pasada. Avisa a los mismos destinatarios que un cambio de estado (RF-11).
+      operationId: scheduleVisit
+      x-roles: [Mantenimiento, Administración]
+      x-acceptance-criteria: [RF-15-AC-2]
+      x-idempotent: true
+      parameters:
+        - {$ref: '#/components/parameters/IfMatch'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fechaVisita]
+              properties:
+                fechaVisita: {type: string, format: date-time}
+      responses:
+        '200':
+          description: Fecha registrada.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportDetail'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '412': {$ref: '#/components/responses/PreconditionFailed'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+    delete:
+      tags: [Seguimiento]
+      summary: Quitar la fecha programada de visita
+      description: Se usa cuando se cancela la cita; genera el aviso de RF-11 y queda en el historial.
+      operationId: cancelVisit
+      x-roles: [Mantenimiento, Administración]
+      x-acceptance-criteria: [RF-15-AC-2]
+      x-idempotent: true
+      responses:
+        '204': {description: Fecha programada eliminada.}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /reports/{folio}/holds:
+    parameters:
+      - {$ref: '#/components/parameters/Folio'}
+    post:
+      tags: [Seguimiento]
+      summary: Registrar una detención del reporte (no cambia el estado)
+      description: Solo en `Asignado` o `EnProceso`; en otro estado, o si ya hay una detención abierta, responde 409. Avisa al residente reportante (RF-11).
+      operationId: createHold
+      x-roles: [Mantenimiento, Administración]
+      x-acceptance-criteria: [RF-18-AC-1, RF-18-AC-2, RF-18-AC-4, RF-18-AC-5, RF-22-AC-3]
+      x-idempotent: true
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/HoldCreate'}
+      responses:
+        '201':
+          description: Detención abierta.
+          headers: {Location: {$ref: '#/components/headers/Location'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Hold'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422':
+          description: «Indique el motivo de la detención» (o el texto de «Otro»).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /reports/{folio}/holds/{holdId}:
+    parameters:
+      - {$ref: '#/components/parameters/Folio'}
+      - {$ref: '#/components/parameters/HoldId'}
+    patch:
+      tags: [Seguimiento]
+      summary: Reanudar una detención
+      description: El servidor fija `fechaFin` con su reloj (RNF-10). Idempotente, de modo que reanudar una detención ya cerrada responde 200 sin cambios.
+      operationId: resumeHold
+      x-roles: [Mantenimiento, Administración]
+      x-acceptance-criteria: [RF-18-AC-3]
+      x-idempotent: true
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              type: object
+              required: [reanudada]
+              properties:
+                reanudada: {type: boolean, enum: [true]}
+      responses:
+        '200':
+          description: Detención cerrada con `fechaFin`.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Hold'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+
+  # ================= Archivos =================
+  /reports/{folio}/files:
+    get:
+      tags: [Archivos]
+      summary: Listar fotos y video del reporte, por etapa y ciclo
+      operationId: listReportFiles
+      x-roles: [Residente, Vigilancia, Mantenimiento, Administración]
+      x-acceptance-criteria: [RF-05-AC-1, RF-05-AC-5]
+      x-idempotent: true
+      parameters:
+        - {$ref: '#/components/parameters/Folio'}
+      responses:
+        '200':
+          description: Archivos visibles para el rol (fotos de interiores solo de su unidad, RD-08).
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/FileRef'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /reports/{folio}/files/{fileId}:
+    parameters:
+      - {$ref: '#/components/parameters/Folio'}
+      - {$ref: '#/components/parameters/FileId'}
+    get:
+      tags: [Archivos]
+      summary: Descargar una foto o un video
+      operationId: downloadReportFile
+      x-roles: [Residente, Vigilancia, Mantenimiento, Administración]
+      x-acceptance-criteria: [RF-05-AC-5]
+      x-idempotent: true
+      responses:
+        '200':
+          description: Contenido del archivo.
+          content:
+            image/jpeg: {schema: {type: string, format: binary}}
+            image/png: {schema: {type: string, format: binary}}
+            video/mp4: {schema: {type: string, format: binary}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/ServerError'}
+    delete:
+      tags: [Archivos]
+      summary: Borrar un archivo (siempre rechazado, RNF-07)
+      description: Ningún archivo se puede borrar, ni siquiera la Administración. Responde 403 y el archivo sigue guardado (404 si no es visible).
+      operationId: deleteReportFileRejected
+      x-roles: [ninguno]
+      x-acceptance-criteria: [RF-05-AC-7]
+      x-idempotent: true
+      responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /reports/{folio}/files/{fileId}/shares:
+    post:
+      tags: [Archivos]
+      summary: Dejar constancia de una foto compartida manualmente con un proveedor sin acceso (RNF-15)
+      description: Bitácora de qué foto, con quién y cuándo. El envío de la foto se hace fuera del sistema.
+      operationId: createFileShare
+      x-roles: [Administración]
+      x-acceptance-criteria: []
+      x-requirements: [RNF-15, RD-08]
+      x-idempotent: false
+      parameters:
+        - {$ref: '#/components/parameters/Folio'}
+        - {$ref: '#/components/parameters/FileId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [proveedorId]
+              properties:
+                proveedorId: {type: string, format: uuid}
+                consentimientoResidente: {type: boolean, description: Requerido cuando la foto muestra el interior de una unidad.}
+      responses:
+        '201':
+          description: Constancia registrada.
+          headers: {Location: {$ref: '#/components/headers/Location'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/FileShare'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+
+  # ================= Costos y garantía =================
+  /reports/{folio}/costs:
+    parameters:
+      - {$ref: '#/components/parameters/Folio'}
+    get:
+      tags: [Costos y garantía]
+      summary: Entradas de costo del reporte (vigentes y anuladas)
+      description: El monto es solo de la Administración; el Residente obtiene el pagador dentro del detalle del reporte.
+      operationId: listCosts
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-20-AC-4]
+      x-idempotent: true
+      responses:
+        '200':
+          description: Entradas de costo, de la más reciente a la más antigua.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Cost'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/ServerError'}
+    post:
+      tags: [Costos y garantía]
+      summary: Registrar costo y pagador, o corregir uno previo
+      description: Posible en cualquier estado, incluidos `Terminado` y `Cerrado`. Una corrección es una entrada nueva con `anulaCostoId`; la original se conserva (RNF-07).
+      operationId: createCost
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-20-AC-1, RF-20-AC-2, RF-20-AC-3, RF-20-AC-4]
+      x-idempotent: true
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CostCreate'}
+      responses:
+        '201':
+          description: Entrada de costo vigente.
+          headers: {Location: {$ref: '#/components/headers/Location'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Cost'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422':
+          description: «El monto no puede ser negativo».
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /reports/{folio}/warranty:
+    put:
+      tags: [Costos y garantía]
+      summary: Marcar la reparación «con garantía» (extiende la retención de fotos, RNF-13)
+      description: Sobre un reporte `Terminado`. Permite que la Administración marque la garantía después, por ejemplo cuando el avance lo registra en nombre de un proveedor sin acceso. La fecha no puede ser pasada.
+      operationId: setWarranty
+      x-roles: [Mantenimiento, Administración]
+      x-acceptance-criteria: [RF-25-AC-1, RF-25-AC-2]
+      x-idempotent: true
+      parameters:
+        - {$ref: '#/components/parameters/Folio'}
+        - {$ref: '#/components/parameters/IfMatch'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [garantiaVencimiento]
+              properties:
+                garantiaVencimiento: {type: string, format: date}
+      responses:
+        '200':
+          description: Garantía registrada en el ciclo `Terminado`.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReportDetail'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '412': {$ref: '#/components/responses/PreconditionFailed'}
+        '422':
+          description: «La fecha de vencimiento no puede ser pasada».
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '500': {$ref: '#/components/responses/ServerError'}
+
+  # ================= Avisos =================
+  /notifications:
+    get:
+      tags: [Avisos]
+      summary: Avisos dentro del sistema del usuario autenticado
+      description: Cada usuario con cuenta ve solo sus avisos (RF-11). Los avisos para reportantes «Sin cuenta» llegan a la Administración con la indicación de comunicarlos manualmente (RF-11-AC-8). El residente no recibe avisos por el paso a `EnProceso` ni por notas internas (RF-11-AC-7).
+      operationId: listNotifications
+      x-roles: [Residente, Vigilancia, Mantenimiento, Administración]
+      x-acceptance-criteria: [RF-11-AC-1, RF-11-AC-2, RF-11-AC-3, RF-11-AC-4, RF-11-AC-5, RF-11-AC-6, RF-11-AC-7, RF-11-AC-8, RF-11-AC-9]
+      x-idempotent: true
+      parameters:
+        - {name: leido, in: query, schema: {type: boolean}}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Página de avisos, del más reciente al más antiguo.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NotificationPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /notifications/{notificationId}:
+    patch:
+      tags: [Avisos]
+      summary: Marcar un aviso como leído
+      operationId: markNotificationRead
+      x-roles: [Residente, Vigilancia, Mantenimiento, Administración]
+      x-acceptance-criteria: []
+      x-requirements: [RF-11]
+      x-idempotent: true
+      parameters:
+        - {name: notificationId, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              type: object
+              required: [leido]
+              properties:
+                leido: {type: boolean, enum: [true]}
+      responses:
+        '200':
+          description: Aviso actualizado.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Notification'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /email-deliveries:
+    get:
+      tags: [Avisos]
+      summary: Correos enviados con su estado (incluye los «Fallidos»)
+      description: Tras 3 intentos fallidos con 10 minutos de separación el correo queda `Fallido` y es visible aquí (RF-11-AC-4). El fallo nunca impide guardar el cambio que lo originó.
+      operationId: listEmailDeliveries
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-11-AC-4]
+      x-idempotent: true
+      parameters:
+        - {name: estado, in: query, schema: {$ref: '#/components/schemas/EstadoCorreo'}}
+        - {name: folio, in: query, schema: {$ref: '#/components/schemas/Folio'}}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Página de envíos.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EmailDeliveryPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/ServerError'}
+
+  # ================= Tablero =================
+  /metrics:
+    get:
+      tags: [Tablero]
+      summary: Tablero de tiempos, recurrencia y adopción; exportable a PDF con `Accept`
+      description: |-
+        Para un rango de fechas de aviso (inclusivo). Con `Accept: application/json` devuelve el tablero; con `Accept: application/pdf` devuelve el mismo contenido imprimible (periodo, tiempos promedio por prioridad, cumplimiento, incidencias recurrentes y adopción) con las **mismas cifras** que la pantalla (RF-23-AC-2, RNF-16).
+        Los `Cancelado` y `Unido` no cuentan en promedios, cumplimiento, recurrencia ni adopción. Los porcentajes se redondean al entero. Las reaperturas aparecen como dato aparte. Los objetivos y la ventana de recurrencia vienen de `/parameters`.
+      operationId: getMetrics
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-13-AC-1, RF-13-AC-2, RF-13-AC-3, RF-13-AC-4, RF-13-AC-5, RF-13-AC-6, RF-13-AC-7, RF-13-AC-8, RF-23-AC-1, RF-23-AC-2, RF-23-AC-3, RF-27-AC-1]
+      x-idempotent: true
+      parameters:
+        - {name: desde, in: query, required: true, description: Primer día del rango de fechas de aviso., schema: {type: string, format: date}}
+        - {name: hasta, in: query, required: true, description: 'Último día del rango (incluye hasta las 23:59:59).', schema: {type: string, format: date}}
+      responses:
+        '200':
+          description: Tablero del periodo.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Metrics'}
+            application/pdf:
+              schema: {type: string, format: binary}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+
+  # ================= Delegaciones =================
+  /delegations:
+    get:
+      tags: [Delegaciones]
+      summary: Delegaciones a la Auxiliar (vigentes e históricas)
+      operationId: listDelegations
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-21-AC-3]
+      x-idempotent: true
+      parameters:
+        - {name: vigente, in: query, schema: {type: boolean}}
+      responses:
+        '200':
+          description: Delegaciones.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Delegation'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/ServerError'}
+    post:
+      tags: [Delegaciones]
+      summary: Habilitar la delegación temporal a la Auxiliar
+      description: Habilita asignar, reclasificar, cerrar y clasificar urgencia y responsabilidad, con fecha de fin opcional. Solo el Administrador; la Auxiliar nunca se delega a sí misma, ni modifica parámetros ni autoriza gastos (RD-10).
+      operationId: createDelegation
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-21-AC-1, RF-21-AC-5]
+      x-idempotent: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DelegationCreate'}
+      responses:
+        '201':
+          description: Delegación vigente.
+          headers: {Location: {$ref: '#/components/headers/Location'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Delegation'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409':
+          description: Ya existe una delegación vigente para esa Auxiliar.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /delegations/{delegationId}:
+    patch:
+      tags: [Delegaciones]
+      summary: Deshabilitar la delegación o cambiar su fecha de fin
+      description: 'Deshabilitar es `{"habilitada": false}`. La delegación se conserva en el historial; no se elimina (RNF-07). Surte efecto en la siguiente petición de la Auxiliar.'
+      operationId: updateDelegation
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-21-AC-3, RF-21-AC-5]
+      x-idempotent: true
+      parameters:
+        - {name: delegationId, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema: {$ref: '#/components/schemas/DelegationUpdate'}
+      responses:
+        '200':
+          description: Delegación actualizada.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Delegation'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+
+  # ================= Parámetros =================
+  /parameters:
+    get:
+      tags: [Parámetros]
+      summary: Parámetros configurables y su valor vigente
+      operationId: listParameters
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-27-AC-1]
+      x-idempotent: true
+      responses:
+        '200':
+          description: Todos los parámetros de RF-27.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Parameter'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /parameters/{clave}:
+    put:
+      tags: [Parámetros]
+      summary: Modificar el valor de un parámetro
+      description: Solo el Administrador (la Auxiliar recibe 403). El valor debe ser mayor que cero. El cambio se aplica a consultas y evaluaciones posteriores y registra valor anterior, nuevo, usuario y fecha. Un cambio de `plazoConfirmacionHoras` rige para los ciclos que pasen a `Terminado` después (RF-27-AC-4).
+      operationId: updateParameter
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-22-AC-4, RF-27-AC-1, RF-27-AC-2, RF-27-AC-3, RF-27-AC-4]
+      x-idempotent: true
+      parameters:
+        - {$ref: '#/components/parameters/ParametroClave'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [valor]
+              properties:
+                valor: {type: number, exclusiveMinimum: true, minimum: 0, example: 12}
+      responses:
+        '200':
+          description: Parámetro actualizado.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Parameter'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422':
+          description: «El valor debe ser mayor que cero»; se conserva el valor vigente.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {codigo: VALIDACION, mensaje: El valor debe ser mayor que cero, errores: [{campo: valor, mensaje: El valor debe ser mayor que cero}]}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /parameters/{clave}/changes:
+    get:
+      tags: [Parámetros]
+      summary: Bitácora de cambios del parámetro (solo inserción)
+      operationId: listParameterChanges
+      x-roles: [Administración]
+      x-acceptance-criteria: [RF-27-AC-1]
+      x-idempotent: true
+      parameters:
+        - {$ref: '#/components/parameters/ParametroClave'}
+      responses:
+        '200':
+          description: Cambios, del más reciente al más antiguo.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/ParameterChange'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/ServerError'}
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT obtenido en `POST /sessions`. Expira tras 30 minutos de inactividad (RNF-06). El rol sale del token, nunca de la URL.
+
+  parameters:
+    Page: {name: page, in: query, description: Número de página (desde 1)., schema: {type: integer, minimum: 1, default: 1}}
+    PageSize: {name: pageSize, in: query, description: Elementos por página., schema: {type: integer, minimum: 1, maximum: 100, default: 20}}
+    UnitId: {name: unitId, in: path, required: true, schema: {type: string, format: uuid}}
+    AreaId: {name: areaId, in: path, required: true, schema: {type: string, format: uuid}}
+    UserId: {name: userId, in: path, required: true, schema: {type: string, format: uuid}}
+    ProviderId: {name: providerId, in: path, required: true, schema: {type: string, format: uuid}}
+    Folio: {name: folio, in: path, required: true, description: 'Folio del reporte, por ejemplo `RY-000124`.', schema: {$ref: '#/components/schemas/Folio'}}
+    HoldId: {name: holdId, in: path, required: true, schema: {type: string, format: uuid}}
+    FileId: {name: fileId, in: path, required: true, schema: {type: string, format: uuid}}
+    ParametroClave: {name: clave, in: path, required: true, description: Clave del parámetro de RF-27., schema: {$ref: '#/components/schemas/ParametroClave'}}
+    IfMatch: {name: If-Match, in: header, required: true, description: 'ETag del recurso leído; si cambió, responde 412.', schema: {type: string}}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: UUID generado por el cliente; un reintento con la misma clave devuelve el resultado original sin repetir la operación (RNF-11).
+      schema: {type: string, format: uuid}
+
+  headers:
+    Location: {description: URL del recurso creado., schema: {type: string}}
+    ETag: {description: Versión del recurso para `If-Match`., schema: {type: string}}
+
+  responses:
+    BadRequest:
+      description: La petición no se pudo interpretar (JSON mal formado, tipo de dato incorrecto, parámetro desconocido).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {codigo: PETICION_INVALIDA, mensaje: La petición no es válida}
+    Unauthorized:
+      description: Sin sesión, JWT inválido o vencido.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {codigo: NO_AUTENTICADO, mensaje: Inicie sesión para continuar}
+    Forbidden:
+      description: El rol o la delegación vigente no permiten la acción; no cambia nada.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {codigo: PROHIBIDO, mensaje: No tiene permiso para esta acción}
+    NotFound:
+      description: El recurso no existe o no es visible para el usuario (matriz 2.3).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {codigo: NO_ENCONTRADO, mensaje: Recurso no encontrado}
+    Conflict:
+      description: El estado actual no permite la operación.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {codigo: TRANSICION_NO_PERMITIDA, mensaje: Transición no permitida}
+    PreconditionFailed:
+      description: El `If-Match` no coincide con la versión vigente; vuelva a leer el recurso.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {codigo: VERSION_OBSOLETA, mensaje: El recurso cambió; vuelva a consultarlo}
+    PayloadTooLarge:
+      description: El cuerpo excede el máximo permitido (foto 10 MB, video 50 MB).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Unprocessable:
+      description: Validación fallida; indica el campo y el mensaje.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {codigo: VALIDACION, mensaje: Datos inválidos, errores: [{campo: campo, mensaje: Mensaje de validación}]}
+    ServerError:
+      description: Error inesperado del servidor.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {codigo: ERROR_INTERNO, mensaje: Ocurrió un error inesperado}
+
+  schemas:
+    # ---------- Comunes ----------
+    Error:
+      type: object
+      required: [codigo, mensaje]
+      properties:
+        codigo: {type: string, example: VALIDACION}
+        mensaje: {type: string, description: Mensaje en español para mostrar al usuario.}
+        errores:
+          type: array
+          items:
+            type: object
+            required: [campo, mensaje]
+            properties:
+              campo: {type: string}
+              mensaje: {type: string}
+    Message:
+      type: object
+      required: [mensaje]
+      properties:
+        mensaje: {type: string}
+    Pagination:
+      type: object
+      required: [page, pageSize, total]
+      properties:
+        page: {type: integer}
+        pageSize: {type: integer}
+        total: {type: integer}
+    Folio: {type: string, pattern: '^RY-\d{6}$', example: RY-000124}
+    TipoUbicacion: {type: string, enum: [Unidad, AreaComun]}
+    Rol: {type: string, enum: [Residente, Vigilancia, Mantenimiento, Administracion]}
+    EstadoCuenta: {type: string, enum: [PendienteActivacion, Activa, Desactivada]}
+    EstadoReporte: {type: string, enum: [Reportado, Asignado, EnProceso, Terminado, Cerrado, Cancelado, Unido]}
+    Prioridad: {type: string, enum: [Urgente, Normal, Menor]}
+    MedioOrigen: {type: string, enum: [Sistema, WhatsApp, Llamada, Caseta, Correo, Presencial]}
+    Responsabilidad: {type: string, enum: [Comun, Privada, PorDeterminar]}
+    Ocupacion: {type: string, enum: [Propietario, Inquilino]}
+    Pagador: {type: string, enum: [Condominio, Condomino], description: 'Condominio (fondo de mantenimiento) o condómino (propietario de la unidad, RD-03 y RD-05).'}
+    EstadoCorreo: {type: string, enum: [Pendiente, Enviado, Fallido]}
+    MotivoDetencion: {type: string, enum: [AccesoAlDepartamento, EsperaDeProveedor, EsperaDePieza, EsperaDeAutorizacionDeGasto, Otro]}
+    ParametroClave:
+      type: string
+      enum: [objetivoPrimeraAtencionUrgenteHoras, objetivoResolucionUrgenteHoras, objetivoResolucionNormalHoras, objetivoResolucionMenorHoras, umbralEstancamientoUrgenteHoras, umbralEstancamientoNormalHoras, umbralEstancamientoMenorHoras, plazoConfirmacionHoras, plazoReaperturaDias, ventanaRecurrenciaDias, minimoRecurrencia]
+
+    # ---------- Autenticación ----------
+    Credenciales:
+      type: object
+      required: [correo, password]
+      properties:
+        correo: {type: string, format: email}
+        password: {type: string, format: password}
+    Sesion:
+      type: object
+      required: [token, tipo, expiraEn, usuario]
+      properties:
+        token: {type: string, description: JWT.}
+        tipo: {type: string, enum: [Bearer]}
+        expiraEn: {type: integer, description: Segundos de inactividad tolerados., example: 1800}
+        usuario: {$ref: '#/components/schemas/SesionUsuario'}
+    SesionUsuario:
+      type: object
+      required: [id, nombre, rol]
+      properties:
+        id: {type: string, format: uuid}
+        nombre: {type: string}
+        rol: {$ref: '#/components/schemas/Rol'}
+        perfilAdministracion: {type: string, enum: [Administrador, Auxiliar], description: Solo para el rol Administracion.}
+        delegacionVigente: {type: boolean, description: Solo para la Auxiliar.}
+        unidad: {$ref: '#/components/schemas/Unit'}
+    TokenPassword:
+      type: object
+      required: [token, password]
+      properties:
+        token: {type: string}
+        password: {type: string, format: password, minLength: 8}
+
+    # ---------- Padrón ----------
+    Propietario:
+      type: object
+      required: [nombre, correo, viveEnCondominio]
+      properties:
+        nombre: {type: string}
+        correo: {type: string, format: email}
+        viveEnCondominio: {type: boolean, description: El propietario que no vive en el condominio no tiene cuenta.}
+    Unit:
+      type: object
+      required: [id, torre, piso, numero, etiqueta, activa]
+      properties:
+        id: {type: string, format: uuid}
+        torre: {type: string, example: B}
+        piso: {type: integer, example: 5}
+        numero: {type: string, example: '502'}
+        etiqueta: {type: string, example: B-502}
+        activa: {type: boolean}
+        propietario: {$ref: '#/components/schemas/Propietario'}
+    UnitCreate:
+      type: object
+      required: [torre, piso, numero, propietario]
+      properties:
+        torre: {type: string, minLength: 1}
+        piso: {type: integer}
+        numero: {type: string, minLength: 1}
+        propietario: {$ref: '#/components/schemas/Propietario'}
+    UnitUpdate:
+      type: object
+      properties:
+        torre: {type: string}
+        piso: {type: integer}
+        numero: {type: string}
+        propietario: {$ref: '#/components/schemas/Propietario'}
+        activa: {type: boolean}
+    UnitPage:
+      type: object
+      required: [items, pagination]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Unit'}}
+        pagination: {$ref: '#/components/schemas/Pagination'}
+    CommonArea:
+      type: object
+      required: [id, nombre, activa]
+      properties:
+        id: {type: string, format: uuid}
+        nombre: {type: string}
+        activa: {type: boolean}
+    CommonAreaCreate:
+      type: object
+      required: [nombre]
+      properties:
+        nombre: {type: string, minLength: 1}
+    CommonAreaUpdate:
+      type: object
+      properties:
+        nombre: {type: string}
+        activa: {type: boolean}
+    Vinculacion:
+      type: object
+      required: [id, unidad, ocupacion, fechaInicio]
+      properties:
+        id: {type: string, format: uuid}
+        unidad: {$ref: '#/components/schemas/Unit'}
+        ocupacion: {$ref: '#/components/schemas/Ocupacion'}
+        fechaInicio: {type: string, format: date-time}
+        fechaFin: {type: string, format: date-time, nullable: true}
+    VinculacionCreate:
+      type: object
+      required: [unidadId, ocupacion, fechaInicio]
+      properties:
+        unidadId: {type: string, format: uuid}
+        ocupacion: {$ref: '#/components/schemas/Ocupacion'}
+        fechaInicio: {type: string, format: date-time}
+    MantenimientoDatos:
+      type: object
+      required: [tipo]
+      properties:
+        tipo: {type: string, enum: [PersonalPropio, ProveedorExterno]}
+        especialidad: {type: string}
+        telefono: {type: string}
+    User:
+      type: object
+      required: [id, nombre, correo, rol, estadoCuenta]
+      properties:
+        id: {type: string, format: uuid}
+        nombre: {type: string}
+        correo: {type: string, format: email}
+        rol: {$ref: '#/components/schemas/Rol'}
+        estadoCuenta: {$ref: '#/components/schemas/EstadoCuenta'}
+        vinculacion: {$ref: '#/components/schemas/Vinculacion'}
+        mantenimiento: {$ref: '#/components/schemas/MantenimientoDatos'}
+        perfilAdministracion: {type: string, enum: [Administrador, Auxiliar]}
+    UserCreate:
+      type: object
+      required: [nombre, correo, rol]
+      properties:
+        nombre: {type: string, minLength: 1}
+        correo: {type: string, format: email}
+        rol: {$ref: '#/components/schemas/Rol'}
+        vinculacion: {$ref: '#/components/schemas/VinculacionCreate'}
+        mantenimiento: {$ref: '#/components/schemas/MantenimientoDatos'}
+        perfilAdministracion: {type: string, enum: [Administrador, Auxiliar]}
+    UserUpdate:
+      type: object
+      properties:
+        nombre: {type: string}
+        correo: {type: string, format: email}
+        estadoCuenta: {type: string, enum: [Activa, Desactivada]}
+        mantenimiento: {$ref: '#/components/schemas/MantenimientoDatos'}
+    UserPage:
+      type: object
+      required: [items, pagination]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/User'}}
+        pagination: {$ref: '#/components/schemas/Pagination'}
+    ExternalProvider:
+      type: object
+      required: [id, nombre, especialidad, telefono, activo]
+      properties:
+        id: {type: string, format: uuid}
+        nombre: {type: string}
+        especialidad: {type: string}
+        telefono: {type: string}
+        activo: {type: boolean}
+    ExternalProviderCreate:
+      type: object
+      required: [nombre, especialidad, telefono]
+      properties:
+        nombre: {type: string, minLength: 1}
+        especialidad: {type: string, minLength: 1}
+        telefono: {type: string, minLength: 1}
+    ExternalProviderUpdate:
+      type: object
+      properties:
+        nombre: {type: string}
+        especialidad: {type: string}
+        telefono: {type: string}
+        activo: {type: boolean}
+    ExternalProviderPage:
+      type: object
+      required: [items, pagination]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/ExternalProvider'}}
+        pagination: {$ref: '#/components/schemas/Pagination'}
+    ResponsableRef:
+      type: object
+      required: [id, tipo, nombre, sinAcceso]
+      properties:
+        id: {type: string, format: uuid}
+        tipo: {type: string, enum: [PersonalPropio, ProveedorExterno]}
+        nombre: {type: string}
+        especialidad: {type: string}
+        sinAcceso: {type: boolean, description: 'true para proveedores sin cuenta («Sin acceso al sistema»).'}
+    Category:
+      type: object
+      required: [id, nombre, subtipos]
+      properties:
+        id: {type: string, format: uuid}
+        nombre: {type: string, example: Iluminación}
+        subtipos:
+          type: array
+          description: Vacío si la categoría no tiene subtipo.
+          items:
+            type: object
+            required: [nombre, prioridadSugerida]
+            properties:
+              nombre: {type: string, example: Jardín o exterior}
+              prioridadSugerida: {$ref: '#/components/schemas/Prioridad'}
+        prioridadSugerida: {$ref: '#/components/schemas/Prioridad'}
+
+    # ---------- Reportes ----------
+    Ubicacion:
+      type: object
+      required: [tipo]
+      properties:
+        tipo: {$ref: '#/components/schemas/TipoUbicacion'}
+        unidadId: {type: string, format: uuid}
+        areaComunId: {type: string, format: uuid}
+        parteAfectada: {type: string, description: Parte afectada dentro de la unidad.}
+        referencia: {type: string, description: Referencia en texto libre en áreas comunes.}
+        etiqueta: {type: string, readOnly: true, example: B-502}
+    ReportCreate:
+      type: object
+      required: [categoriaId, descripcion, ubicacion, esPeligroso]
+      properties:
+        categoriaId: {type: string, format: uuid}
+        subtipo: {type: string}
+        descripcion: {type: string, minLength: 10, maxLength: 1000}
+        ubicacion: {$ref: '#/components/schemas/Ubicacion'}
+        esPeligroso: {type: boolean}
+        autorizaAcceso: {type: boolean, description: Obligatorio si la ubicación es el interior de una unidad.}
+        horariosAcceso: {type: string}
+        desdeCuando: {type: string, description: Opcional (RF-03-AC-9).}
+        habiaPasadoAntes: {type: boolean, description: Opcional (RF-03-AC-9).}
+        medioOrigen: {$ref: '#/components/schemas/MedioOrigen'}
+        fechaAviso: {type: string, format: date-time}
+        residenteReportanteId: {type: string, format: uuid}
+        nombreReferencia: {type: string}
+        contactoReferencia: {type: string}
+    ReportCreateForm:
+      type: object
+      required: [datos]
+      properties:
+        datos: {$ref: '#/components/schemas/ReportCreate'}
+        fotos: {type: array, maxItems: 5, items: {type: string, format: binary}}
+        video: {type: string, format: binary}
+    ArchivoRechazado:
+      type: object
+      required: [nombre, motivo]
+      properties:
+        nombre: {type: string}
+        motivo: {type: string, example: Solo se aceptan fotos JPEG o PNG de hasta 10 MB}
+    ReportCreated:
+      allOf:
+        - $ref: '#/components/schemas/ReportDetail'
+        - type: object
+          properties:
+            archivosRechazados:
+              type: array
+              items: {$ref: '#/components/schemas/ArchivoRechazado'}
+    ReportSummary:
+      type: object
+      required: [folio, estado, categoria, ubicacion, fechaAviso]
+      properties:
+        folio: {$ref: '#/components/schemas/Folio'}
+        estado: {$ref: '#/components/schemas/EstadoReporte'}
+        prioridad: {$ref: '#/components/schemas/Prioridad'}
+        categoria: {type: string}
+        subtipo: {type: string}
+        descripcion: {type: string}
+        ubicacion: {$ref: '#/components/schemas/Ubicacion'}
+        fechaAviso: {type: string, format: date-time}
+        detenido: {type: boolean}
+        posibleDuplicado: {type: boolean}
+        mensajeAcceso: {type: string, description: 'Solo Mantenimiento: «Sin autorización de acceso: coordinar con la Administración».'}
+    ReportPage:
+      type: object
+      required: [items, pagination]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/ReportSummary'}}
+        pagination: {$ref: '#/components/schemas/Pagination'}
+    Ciclo:
+      type: object
+      required: [numero, inicio]
+      properties:
+        numero: {type: integer, minimum: 1}
+        inicio: {type: string, format: date-time}
+        fin: {type: string, format: date-time}
+        fotosEvidencia: {type: array, items: {$ref: '#/components/schemas/FileRef'}}
+        notaTrabajo: {type: string}
+        pendientes: {type: string}
+        sinEvidenciaFotografica: {type: boolean, description: 'Marca «Terminado sin evidencia fotográfica» (RD-09).'}
+        justificacionSinEvidencia: {type: string}
+        garantiaVencimiento: {type: string, format: date}
+        confirmacion: {$ref: '#/components/schemas/Confirmacion'}
+        plazoConfirmacionHasta: {type: string, format: date-time}
+    ReportDetail:
+      allOf:
+        - $ref: '#/components/schemas/ReportSummary'
+        - type: object
+          description: Los campos que la matriz 2.3 niega al rol que consulta no se incluyen.
+          properties:
+            ubicacionOrigen: {$ref: '#/components/schemas/Ubicacion'}
+            medioOrigen: {$ref: '#/components/schemas/MedioOrigen'}
+            esPeligroso: {type: boolean}
+            prioridadSugerida: {$ref: '#/components/schemas/Prioridad'}
+            responsabilidad: {$ref: '#/components/schemas/Responsabilidad'}
+            responsableCosto: {$ref: '#/components/schemas/Pagador'}
+            responsable: {$ref: '#/components/schemas/ResponsableRef'}
+            reportante: {type: object, description: Omitido en áreas comunes para el Residente., properties: {id: {type: string, format: uuid}, nombre: {type: string}, sinCuenta: {type: boolean}}}
+            capturadoPor: {type: object, properties: {id: {type: string, format: uuid}, nombre: {type: string}}}
+            fechaCaptura: {type: string, format: date-time}
+            propietario: {$ref: '#/components/schemas/Propietario'}
+            autorizaAcceso: {type: boolean}
+            horariosAcceso: {type: string}
+            desdeCuando: {type: string}
+            habiaPasadoAntes: {type: boolean}
+            fechaVisita: {type: string, format: date-time}
+            detencionAbierta: {$ref: '#/components/schemas/Hold'}
+            reportePrincipal: {$ref: '#/components/schemas/Folio'}
+            montoCosto: {type: number, description: Solo Administración.}
+            pagador: {$ref: '#/components/schemas/Pagador'}
+            notas: {type: array, items: {$ref: '#/components/schemas/Note'}}
+            fotosAlta: {type: array, items: {$ref: '#/components/schemas/FileRef'}}
+            ciclos: {type: array, items: {$ref: '#/components/schemas/Ciclo'}}
+            reaperturas: {type: integer}
+    ReportCorrection:
+      type: object
+      properties:
+        categoriaId: {type: string, format: uuid}
+        subtipo: {type: string}
+        descripcion: {type: string, minLength: 10, maxLength: 1000}
+        ubicacion: {$ref: '#/components/schemas/Ubicacion'}
+    HistoryEntry:
+      type: object
+      required: [id, tipo, fecha, autor]
+      properties:
+        id: {type: string, format: uuid}
+        tipo: {type: string, enum: [CambioEstado, Reclasificacion, Nota, Correccion, Detencion, Reanudacion, Costo, Confirmacion, PersistenciaIndicada, AvisoEnviado, Delegacion, UnionDuplicado, MarcaDuplicado]}
+        fecha: {type: string, format: date-time}
+        autor: {type: string, description: 'Nombre del usuario; si actuó en nombre de otro, ambos.'}
+        actuaEnNombreDe: {type: string}
+        campo: {type: string}
+        valorAnterior: {type: string}
+        valorNuevo: {type: string}
+        comentario: {type: string}
+        canal: {type: string, description: 'Canal del aviso, para constancia (RF-11).'}
+    HistoryPage:
+      type: object
+      required: [items, pagination]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/HistoryEntry'}}
+        pagination: {$ref: '#/components/schemas/Pagination'}
+
+    # ---------- Flujo ----------
+    AssignRequest:
+      type: object
+      required: [prioridad, responsableId]
+      properties:
+        prioridad: {$ref: '#/components/schemas/Prioridad'}
+        responsableId: {type: string, format: uuid, description: Usuario de Mantenimiento o proveedor externo (con o sin acceso).}
+        ubicacionOrigen: {$ref: '#/components/schemas/Ubicacion'}
+        responsabilidad: {$ref: '#/components/schemas/Responsabilidad'}
+        responsableCosto: {$ref: '#/components/schemas/Pagador'}
+    ReclassifyRequest:
+      type: object
+      minProperties: 1
+      properties:
+        prioridad: {$ref: '#/components/schemas/Prioridad'}
+        responsableId: {type: string, format: uuid}
+        ubicacionOrigen: {$ref: '#/components/schemas/Ubicacion'}
+        responsabilidad: {$ref: '#/components/schemas/Responsabilidad'}
+        responsableCosto: {$ref: '#/components/schemas/Pagador'}
+    StartRequest:
+      type: object
+      properties:
+        actuaEnNombreDe: {type: string, description: Proveedor sin acceso en cuyo nombre registra la Administración.}
+    CompletionData:
+      type: object
+      properties:
+        notaTrabajo: {type: string, maxLength: 1000}
+        justificacionSinEvidencia: {type: string, description: Solo Administración con proveedor sin acceso (RD-09).}
+        garantiaVencimiento: {type: string, format: date}
+        pendientes: {type: string, maxLength: 1000, description: Descripción de lo pendiente si solo se atendió lo urgente (RF-08-AC-7); queda en el historial.}
+    CompletionForm:
+      type: object
+      properties:
+        datos: {$ref: '#/components/schemas/CompletionData'}
+        fotos: {type: array, minItems: 0, maxItems: 5, items: {type: string, format: binary}}
+    CompletionResult:
+      allOf:
+        - $ref: '#/components/schemas/ReportDetail'
+        - type: object
+          properties:
+            archivosRechazados:
+              type: array
+              items: {$ref: '#/components/schemas/ArchivoRechazado'}
+    ResidentResponseCreate:
+      type: object
+      required: [respuesta]
+      properties:
+        respuesta: {type: string, enum: [YaQuedo, SigueFallando]}
+        comentario: {type: string, maxLength: 1000, description: Obligatorio con `SigueFallando`.}
+    Confirmacion:
+      type: object
+      required: [respuesta, fecha]
+      properties:
+        respuesta: {type: string, enum: [YaQuedo, SigueFallando]}
+        comentario: {type: string}
+        fecha: {type: string, format: date-time}
+    CloseRequest:
+      type: object
+      properties:
+        motivo: {type: string, description: Obligatorio si el residente respondió «Sigue fallando» o si se cierra sin confirmación.}
+    CommentRequest:
+      type: object
+      required: [comentario]
+      properties:
+        comentario: {type: string, minLength: 1, maxLength: 1000}
+    CancelRequest:
+      type: object
+      required: [motivo]
+      properties:
+        motivo: {type: string, minLength: 1, maxLength: 500}
+    IndicacionPersistencia:
+      type: object
+      required: [id, fecha, residente]
+      properties:
+        id: {type: string, format: uuid}
+        fecha: {type: string, format: date-time}
+        residente: {type: string}
+        comentario: {type: string}
+    Note:
+      type: object
+      required: [id, texto, autor, fecha]
+      properties:
+        id: {type: string, format: uuid}
+        texto: {type: string}
+        autor: {type: string}
+        fecha: {type: string, format: date-time}
+    HoldCreate:
+      type: object
+      required: [motivo]
+      properties:
+        motivo: {$ref: '#/components/schemas/MotivoDetencion'}
+        textoOtro: {type: string, description: Obligatorio con `Otro`.}
+    Hold:
+      type: object
+      required: [id, motivo, fechaInicio, autor]
+      properties:
+        id: {type: string, format: uuid}
+        motivo: {$ref: '#/components/schemas/MotivoDetencion'}
+        textoOtro: {type: string}
+        fechaInicio: {type: string, format: date-time}
+        fechaFin: {type: string, format: date-time, nullable: true}
+        autor: {type: string}
+    FileRef:
+      type: object
+      required: [id, tipo, etapa, nombre, fecha]
+      properties:
+        id: {type: string, format: uuid}
+        tipo: {type: string, enum: [Foto, Video]}
+        etapa: {type: string, enum: [Alta, Evidencia]}
+        ciclo: {type: integer}
+        nombre: {type: string}
+        fecha: {type: string, format: date-time}
+        url: {type: string}
+    FileShare:
+      type: object
+      required: [id, archivoId, proveedorId, fecha]
+      properties:
+        id: {type: string, format: uuid}
+        archivoId: {type: string, format: uuid}
+        proveedorId: {type: string, format: uuid}
+        consentimientoResidente: {type: boolean}
+        fecha: {type: string, format: date-time}
+    CostCreate:
+      type: object
+      required: [pagador]
+      properties:
+        monto: {type: number, minimum: 0, description: Opcional (RF-20); en pesos mexicanos.}
+        pagador: {$ref: '#/components/schemas/Pagador'}
+        comentario: {type: string}
+        anulaCostoId: {type: string, format: uuid, description: Entrada de costo que esta corrige; la original se conserva.}
+    Cost:
+      allOf:
+        - $ref: '#/components/schemas/CostCreate'
+        - type: object
+          required: [id, fecha, autor, anulada]
+          properties:
+            id: {type: string, format: uuid}
+            fecha: {type: string, format: date-time}
+            autor: {type: string}
+            anulada: {type: boolean}
+
+    # ---------- Avisos ----------
+    Notification:
+      type: object
+      required: [id, evento, fecha, leido, mensaje]
+      properties:
+        id: {type: string, format: uuid}
+        evento: {type: string}
+        folio: {$ref: '#/components/schemas/Folio'}
+        mensaje: {type: string}
+        fecha: {type: string, format: date-time}
+        leido: {type: boolean}
+    NotificationPage:
+      type: object
+      required: [items, pagination]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Notification'}}
+        pagination: {$ref: '#/components/schemas/Pagination'}
+    EmailDelivery:
+      type: object
+      required: [id, destinatario, estado, intentos, fecha]
+      properties:
+        id: {type: string, format: uuid}
+        folio: {$ref: '#/components/schemas/Folio'}
+        destinatario: {type: string, format: email}
+        evento: {type: string}
+        estado: {$ref: '#/components/schemas/EstadoCorreo'}
+        intentos: {type: integer, maximum: 3}
+        fecha: {type: string, format: date-time}
+    EmailDeliveryPage:
+      type: object
+      required: [items, pagination]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/EmailDelivery'}}
+        pagination: {$ref: '#/components/schemas/Pagination'}
+
+    # ---------- Delegaciones y parámetros ----------
+    DelegationCreate:
+      type: object
+      required: [auxiliarId]
+      properties:
+        auxiliarId: {type: string, format: uuid}
+        fechaFin: {type: string, format: date-time, description: Opcional; después de esta fecha la Auxiliar recibe 403.}
+    DelegationUpdate:
+      type: object
+      properties:
+        habilitada: {type: boolean}
+        fechaFin: {type: string, format: date-time, nullable: true}
+    Delegation:
+      type: object
+      required: [id, auxiliarId, habilitada, fechaInicio]
+      properties:
+        id: {type: string, format: uuid}
+        auxiliarId: {type: string, format: uuid}
+        habilitada: {type: boolean}
+        fechaInicio: {type: string, format: date-time}
+        fechaFin: {type: string, format: date-time, nullable: true}
+    Parameter:
+      type: object
+      required: [clave, valor, unidad]
+      properties:
+        clave: {$ref: '#/components/schemas/ParametroClave'}
+        descripcion: {type: string}
+        valor: {type: number}
+        unidad: {type: string, enum: [horas, dias, reportes]}
+    ParameterChange:
+      type: object
+      required: [clave, valorAnterior, valorNuevo, usuario, fecha]
+      properties:
+        clave: {$ref: '#/components/schemas/ParametroClave'}
+        valorAnterior: {type: number}
+        valorNuevo: {type: number}
+        usuario: {type: string}
+        fecha: {type: string, format: date-time}
+
+    # ---------- Tablero ----------
+    CumplimientoBloque:
+      type: object
+      properties:
+        reportes: {type: integer}
+        cumplen: {type: integer}
+        porcentaje: {type: integer, description: Entero redondeado.}
+    MetricasPrioridad:
+      type: object
+      properties:
+        prioridad: {$ref: '#/components/schemas/Prioridad'}
+        primeraAtencionPromedioMin: {type: number, nullable: true}
+        resolucionPromedioHoras: {type: number, nullable: true}
+        cumplimientoPrimeraAtencion:
+          type: object
+          properties:
+            personalPropio: {$ref: '#/components/schemas/CumplimientoBloque'}
+            proveedoresExternos: {$ref: '#/components/schemas/CumplimientoBloque'}
+        cumplimientoResolucion:
+          type: object
+          properties:
+            personalPropio: {$ref: '#/components/schemas/CumplimientoBloque'}
+            proveedoresExternos: {$ref: '#/components/schemas/CumplimientoBloque'}
+    Metrics:
+      type: object
+      required: [desde, hasta]
+      properties:
+        desde: {type: string, format: date}
+        hasta: {type: string, format: date}
+        porEstado: {type: object, additionalProperties: {type: integer}}
+        porCategoria: {type: object, additionalProperties: {type: integer}}
+        porPrioridad: {type: array, items: {$ref: '#/components/schemas/MetricasPrioridad'}}
+        recurrentes:
+          type: array
+          items:
+            type: object
+            properties:
+              categoria: {type: string}
+              ubicacionOrigen: {type: string}
+              folios: {type: array, items: {$ref: '#/components/schemas/Folio'}}
+        detenciones:
+          type: array
+          items:
+            type: object
+            properties:
+              folio: {$ref: '#/components/schemas/Folio'}
+              horasDetenido: {type: number}
+              motivos: {type: array, items: {type: string}}
+        adopcionPorcentaje: {type: integer}
+        reaperturas: {type: integer}

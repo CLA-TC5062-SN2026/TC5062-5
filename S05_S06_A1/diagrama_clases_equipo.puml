@@ -1,0 +1,566 @@
+@startuml diagrama_clases_equipo
+' ReportaYa — Diagrama de clases del dominio (versión definitiva del equipo)
+' Fuentes: diagrama_clases de Manuel Medina (M), Alejandro Arreola (A) y Luis Guerrero (G);
+'          SRS_equipo.md v2.0 y openapi_equipo.yaml.
+' Convenciones:
+'   - Los atributos que el API expone llevan EXACTAMENTE el nombre del campo del schema.
+'   - /atributo = derivado (se calcula; no se persiste).
+'   - {interno} = persistido pero nunca expuesto por el API.
+'   - Cada clase indica en  ' @api  los schemas del openapi_equipo.yaml que la representan;
+'     ' @map  documenta los campos que se cubren por una asociación o una proyección.
+'   - Fuera del dominio: sesión JWT, tabla de idempotencia, outbox/worker y DTOs de paginación.
+
+title ReportaYa — Diagrama de clases del dominio (definitivo)
+
+skinparam shadowing false
+skinparam defaultFontName Helvetica
+skinparam classAttributeIconSize 0
+skinparam packageStyle rectangle
+skinparam linetype polyline
+skinparam nodesep 50
+skinparam ranksep 60
+hide empty members
+
+' =====================================================================
+' PADRÓN Y USUARIOS (RF-01, RF-02, RF-14, RF-21)
+' =====================================================================
+package "Padrón y usuarios" {
+
+  ' @api User, SesionUsuario, UserCreate, UserUpdate
+  ' @map vinculacion=vinculaciones; mantenimiento=UsuarioMantenimiento; password=contrasenaHash; unidad=vinculaciones; delegacionVigente=delegaciones
+  abstract class Usuario {
+    - id : UUID
+    - nombre : String
+    - correo : String {unique}
+    - estadoCuenta : EstadoCuenta
+    - /rol : Rol
+    - contrasenaHash : String {interno}
+    - intentosFallidos : Integer {interno}
+    - bloqueadoHasta : FechaHora [0..1] {interno}
+  }
+
+  class Residente
+  class Vigilante
+
+  ' @api MantenimientoDatos
+  class UsuarioMantenimiento {
+    - tipo : TipoMantenimiento
+    - especialidad : String [0..1]
+    - telefono : String [0..1]
+  }
+
+  class UsuarioAdministracion {
+    - perfilAdministracion : PerfilAdministracion
+  }
+
+  ' @api Vinculacion, VinculacionCreate
+  ' @map unidad=unidad; unidadId=unidad
+  class VinculacionUnidad {
+    - id : UUID
+    - ocupacion : Ocupacion
+    - fechaInicio : FechaHora
+    - fechaFin : FechaHora [0..1]
+  }
+
+  ' @api Delegation, DelegationCreate, DelegationUpdate
+  ' @map auxiliarId=auxiliar
+  class Delegacion {
+    - id : UUID
+    - habilitada : Boolean
+    - fechaInicio : FechaHora
+    - fechaFin : FechaHora [0..1]
+  }
+
+  ' @api TokenPassword
+  ' @map token=hashToken; password=Usuario.contrasenaHash
+  class EnlaceAcceso {
+    - tipo : TipoEnlace {interno}
+    - hashToken : String {interno}
+    - emitidoEn : FechaHora {interno}
+    - venceEn : FechaHora {interno}
+    - usadoEn : FechaHora [0..1] {interno}
+  }
+
+  ' @api Propietario
+  class Propietario <<valor>> {
+    - nombre : String
+    - correo : String
+    - viveEnCondominio : Boolean
+  }
+
+  ' @api Unit, CommonArea, Ubicacion
+  ' @map tipo=Unidad|AreaComun; unidadId=Unidad; areaComunId=AreaComun; parteAfectada=Reporte.parteAfectada; referencia=Reporte.referencia
+  abstract class Ubicacion {
+    - id : UUID
+    - activa : Boolean
+    - /etiqueta : String
+  }
+
+  ' @api Unit, UnitCreate, UnitUpdate
+  class Unidad {
+    - torre : String
+    - piso : Integer
+    - numero : String
+  }
+
+  ' @api CommonArea, CommonAreaCreate, CommonAreaUpdate
+  class AreaComun {
+    - nombre : String
+  }
+
+  ' @api ResponsableRef
+  interface Responsable {
+    + /id : UUID
+    + /nombre : String
+    + /tipo : TipoMantenimiento
+    + /especialidad : String
+    + /sinAcceso : Boolean
+  }
+
+  ' @api ExternalProvider, ExternalProviderCreate, ExternalProviderUpdate
+  class ProveedorSinAcceso {
+    - id : UUID
+    - nombre : String
+    - especialidad : String
+    - telefono : String
+    - activo : Boolean
+  }
+}
+
+' =====================================================================
+' REPORTE Y SEGUIMIENTO (RF-03 a RF-26)
+' =====================================================================
+package "Reporte y seguimiento" {
+
+  ' @api ReportSummary, ReportDetail, ReportCreate, ReportCorrection, AssignRequest, ReclassifyRequest, CancelRequest, CloseRequest, CommentRequest, StartRequest, Ubicacion
+  ' @map categoriaId=categoria; residenteReportanteId=reportante; responsableId=responsable; ubicacionOrigen=ubicacionOrigen; motivo=CambioEstado.comentario; comentario=CambioEstado.comentario; actuaEnNombreDe=CambioEstado.actuaEnNombreDe; reportePrincipal=reportePrincipal; tipo=ubicacion; unidadId=ubicacion; areaComunId=ubicacion; etiqueta=Ubicacion.etiqueta
+  class Reporte {
+    - folio : String {unique, RY-######}
+    - fechaAviso : FechaHora
+    - fechaCaptura : FechaHora
+    - medioOrigen : MedioOrigen
+    - descripcion : String [10..1000]
+    - parteAfectada : String [0..200]
+    - referencia : String [0..200]
+    - esPeligroso : Boolean
+    - autorizaAcceso : Boolean [0..1]
+    - horariosAcceso : String [0..1]
+    - desdeCuando : String [0..1]
+    - habiaPasadoAntes : Boolean [0..1]
+    - estado : EstadoReporte
+    - prioridadSugerida : Prioridad
+    - prioridad : Prioridad [0..1]
+    - responsabilidad : Responsabilidad
+    - responsableCosto : Pagador [0..1]
+    - fechaVisita : FechaHora [0..1]
+    - nombreReferencia : String [0..1]
+    - contactoReferencia : String [0..1]
+    - /posibleDuplicado : Boolean
+    - /detenido : Boolean
+    - /detencionAbierta : Detencion
+    - /mensajeAcceso : String
+    - /propietario : Propietario
+    - /montoCosto : Decimal
+    - /pagador : Pagador
+    - /reaperturas : Integer
+  }
+
+  ' @api HistoryEntry
+  ' @map tipo=/tipo; autor=autor; actuaEnNombreDe=CambioEstado.actuaEnNombreDe; canal=Aviso
+  abstract class EntradaHistorial {
+    - id : UUID
+    - fecha : FechaHora
+    - /tipo : TipoEntradaHistorial
+    - campo : String [0..1]
+    - valorAnterior : String [0..1]
+    - valorNuevo : String [0..1]
+    - comentario : String [0..1]
+  }
+
+  ' @map estadoAnterior=valorAnterior; estadoNuevo=valorNuevo
+  class CambioEstado {
+    - estadoAnterior : EstadoReporte
+    - estadoNuevo : EstadoReporte
+  }
+
+  class Reclasificacion
+  class VersionCorreccion
+
+  ' @api Note
+  class NotaAvance {
+    - texto : String [1..500]
+  }
+
+  ' @api Cost, CostCreate
+  ' @map anulaCostoId=anulaCosto
+  class Costo {
+    - monto : Decimal [0..1] {>= 0}
+    - pagador : Pagador
+    - /anulada : Boolean
+  }
+
+  ' @api IndicacionPersistencia
+  class IndicacionPersistencia
+
+  ' @api Ciclo, CompletionData
+  ' @map fotos=fotosEvidencia; confirmacion=confirmacion
+  class CicloAtencion {
+    - numero : Integer
+    - inicio : FechaHora
+    - fin : FechaHora [0..1]
+    - notaTrabajo : String [0..1000]
+    - pendientes : String [0..1000]
+    - sinEvidenciaFotografica : Boolean
+    - justificacionSinEvidencia : String [0..1]
+    - garantiaVencimiento : Fecha [0..1]
+    - plazoConfirmacionHasta : FechaHora [0..1]
+  }
+
+  ' @api Confirmacion, ResidentResponseCreate
+  class ConfirmacionResidente {
+    - respuesta : RespuestaResidente
+    - comentario : String [0..1000]
+    - fecha : FechaHora
+  }
+
+  ' @api Hold, HoldCreate
+  class Detencion {
+    - id : UUID
+    - motivo : MotivoDetencion
+    - textoOtro : String [0..1]
+    - fechaInicio : FechaHora
+    - fechaFin : FechaHora [0..1]
+  }
+
+  ' @api FileRef
+  ' @map ciclo=ciclo
+  class Adjunto {
+    - id : UUID
+    - tipo : TipoAdjunto
+    - etapa : EtapaAdjunto
+    - nombre : String
+    - fecha : FechaHora
+    - /url : String
+    - formato : String {interno}
+    - tamanoBytes : Long {interno}
+    - clave : String {interno}
+  }
+
+  ' @api FileShare
+  ' @map archivoId=archivo; proveedorId=proveedor
+  class RegistroComparticion {
+    - id : UUID
+    - fecha : FechaHora
+    - consentimientoResidente : Boolean [0..1]
+  }
+
+  abstract class Aviso {
+    - id : UUID
+    - evento : String
+    - fecha : FechaHora
+  }
+
+  ' @api Notification
+  ' @map folio=reporte
+  class AvisoSistema {
+    - mensaje : String
+    - leido : Boolean
+  }
+
+  ' @api EmailDelivery
+  ' @map folio=reporte
+  class EnvioCorreo {
+    - destinatario : String
+    - estado : EstadoCorreo
+    - intentos : Integer {max 3}
+    - fechaUltimoIntento : FechaHora [0..1] {interno}
+  }
+}
+
+' =====================================================================
+' CATÁLOGO Y CONFIGURACIÓN (RD-01, RF-27)
+' =====================================================================
+package "Catálogo y configuración" {
+
+  ' @api Category
+  ' @map subtipos=subtipos
+  class Categoria {
+    - id : UUID
+    - nombre : String
+    - prioridadSugerida : Prioridad [0..1]
+    - /requiereSubtipo : Boolean
+  }
+
+  ' @map nombre=Category.subtipos; prioridadSugerida=Category.subtipos
+  class Subtipo {
+    - nombre : String
+    - prioridadSugerida : Prioridad
+  }
+
+  ' @api Parameter
+  class Parametro {
+    - clave : ParametroClave {unique}
+    - descripcion : String
+    - valor : Decimal {> 0}
+    - unidad : UnidadParametro
+  }
+
+  ' @api ParameterChange
+  ' @map usuario=modificadoPor; clave=Parametro.cambios
+  class CambioParametro {
+    - valorAnterior : Decimal
+    - valorNuevo : Decimal
+    - fecha : FechaHora
+  }
+}
+
+' =====================================================================
+' ENUMERACIONES (valores idénticos a los enum del openapi_equipo.yaml)
+' =====================================================================
+package "Enumeraciones" {
+  enum Rol {
+    Residente
+    Vigilancia
+    Mantenimiento
+    Administracion
+  }
+  enum EstadoCuenta {
+    PendienteActivacion
+    Activa
+    Desactivada
+  }
+  enum EstadoReporte {
+    Reportado
+    Asignado
+    EnProceso
+    Terminado
+    Cerrado
+    Cancelado
+    Unido
+  }
+  enum Prioridad {
+    Urgente
+    Normal
+    Menor
+  }
+  enum MedioOrigen {
+    Sistema
+    WhatsApp
+    Llamada
+    Caseta
+    Correo
+    Presencial
+  }
+  enum Responsabilidad {
+    Comun
+    Privada
+    PorDeterminar
+  }
+  enum Pagador {
+    Condominio
+    Condomino
+  }
+  enum Ocupacion {
+    Propietario
+    Inquilino
+  }
+  enum TipoMantenimiento {
+    PersonalPropio
+    ProveedorExterno
+  }
+  enum PerfilAdministracion {
+    Administrador
+    Auxiliar
+  }
+  enum TipoEnlace {
+    Activacion
+    Recuperacion
+  }
+  enum MotivoDetencion {
+    AccesoAlDepartamento
+    EsperaDeProveedor
+    EsperaDePieza
+    EsperaDeAutorizacionDeGasto
+    Otro
+  }
+  enum RespuestaResidente {
+    YaQuedo
+    SigueFallando
+  }
+  enum TipoAdjunto {
+    Foto
+    Video
+  }
+  enum EtapaAdjunto {
+    Alta
+    Evidencia
+  }
+  enum EstadoCorreo {
+    Pendiente
+    Enviado
+    Fallido
+  }
+  enum UnidadParametro {
+    horas
+    dias
+    reportes
+  }
+  enum ParametroClave {
+    objetivoPrimeraAtencionUrgenteHoras
+    objetivoResolucionUrgenteHoras
+    objetivoResolucionNormalHoras
+    objetivoResolucionMenorHoras
+    umbralEstancamientoUrgenteHoras
+    umbralEstancamientoNormalHoras
+    umbralEstancamientoMenorHoras
+    plazoConfirmacionHoras
+    plazoReaperturaDias
+    ventanaRecurrenciaDias
+    minimoRecurrencia
+  }
+  enum TipoEntradaHistorial {
+    CambioEstado
+    Reclasificacion
+    Nota
+    Correccion
+    Detencion
+    Reanudacion
+    Costo
+    Confirmacion
+    PersistenciaIndicada
+    AvisoEnviado
+    Delegacion
+    UnionDuplicado
+    MarcaDuplicado
+  }
+}
+
+' =====================================================================
+' HERENCIA / REALIZACIÓN
+' =====================================================================
+Usuario <|-- Residente
+Usuario <|-- Vigilante
+Usuario <|-- UsuarioMantenimiento
+Usuario <|-- UsuarioAdministracion
+
+Responsable <|.. UsuarioMantenimiento
+Responsable <|.. ProveedorSinAcceso
+
+Ubicacion <|-- Unidad
+Ubicacion <|-- AreaComun
+
+EntradaHistorial <|-- CambioEstado
+EntradaHistorial <|-- Reclasificacion
+EntradaHistorial <|-- VersionCorreccion
+EntradaHistorial <|-- NotaAvance
+EntradaHistorial <|-- Costo
+EntradaHistorial <|-- IndicacionPersistencia
+
+Aviso <|-- AvisoSistema
+Aviso <|-- EnvioCorreo
+
+' =====================================================================
+' COMPOSICIÓN (la parte no existe sin el todo; nada se borra, RNF-07)
+' =====================================================================
+Reporte "1" *-- "0..*" EntradaHistorial : historial
+Reporte "1" *-- "0..*" NotaAvance : notas
+Reporte "1" *-- "0..*" CicloAtencion : ciclos
+Reporte "1" *-- "0..*" Detencion : detenciones
+Reporte "1" *-- "0..*" Costo : costos
+Reporte "1" *-- "0..*" IndicacionPersistencia : indicaciones
+Reporte "1" *-- "0..*" Aviso : avisos
+Reporte "1" *-- "0..5" Adjunto : fotosAlta
+Reporte "1" *-- "0..1" Adjunto : video
+CicloAtencion "1" *-- "0..5" Adjunto : fotosEvidencia
+CicloAtencion "1" *-- "0..1" ConfirmacionResidente : confirmacion
+Usuario "1" *-- "0..*" EnlaceAcceso : enlaces
+Usuario "1" *-- "0..*" VinculacionUnidad : vinculaciones
+Unidad "1" *-- "1" Propietario : propietario
+Categoria "1" *-- "0..*" Subtipo : subtipos
+Parametro "1" *-- "0..*" CambioParametro : cambios
+
+' =====================================================================
+' ASOCIACIONES
+' =====================================================================
+VinculacionUnidad "0..*" --> "1" Unidad : unidad
+
+UsuarioAdministracion "1" -- "0..*" Delegacion : otorgadaPor
+Delegacion "0..*" --> "1" UsuarioAdministracion : auxiliar
+
+Reporte "0..*" --> "1" Ubicacion : ubicacion
+Reporte "0..*" --> "0..1" Ubicacion : ubicacionOrigen
+Reporte "0..*" --> "0..1" Residente : reportante
+Reporte "0..*" --> "1" Usuario : capturadoPor
+Reporte "0..*" --> "0..1" Responsable : responsable
+Reporte "0..*" --> "1" Categoria : categoria
+Reporte "0..*" --> "0..1" Subtipo : subtipo
+Reporte "0..*" --> "0..1" Reporte : posibleDuplicadoDe
+Reporte "0..*" --> "0..1" Reporte : reportePrincipal
+
+EntradaHistorial "0..*" --> "1" Usuario : autor
+CambioEstado "0..*" --> "0..1" ProveedorSinAcceso : actuaEnNombreDe
+Costo "0..1" --> "0..1" Costo : anulaCosto
+IndicacionPersistencia "0..*" --> "1" Residente : residente
+ConfirmacionResidente "0..*" --> "1" Residente : respondidaPor
+Detencion "0..*" --> "1" Usuario : autor
+Adjunto "0..*" --> "1" Usuario : subidoPor
+Aviso "0..*" --> "1" Reporte : reporte
+AvisoSistema "0..*" --> "1" Usuario : destinatarioUsuario
+
+CambioParametro "0..*" --> "1" UsuarioAdministracion : modificadoPor
+
+RegistroComparticion "0..*" --> "1" Adjunto : archivo
+RegistroComparticion "0..*" --> "1" ProveedorSinAcceso : proveedor
+RegistroComparticion "0..*" --> "1" UsuarioAdministracion : registradaPor
+
+' =====================================================================
+' NOTAS
+' =====================================================================
+note as N1
+  <b>Decisiones de consenso del equipo</b>
+  D1  Residente no guarda ocupación ni fecha de vinculación:
+      viven en VinculacionUnidad (A, G; API Vinculacion). Hay a lo más
+      una vinculación activa (fechaFin vacía) por residente.
+  D2  Responsable es una interfaz realizada por UsuarioMantenimiento y
+      ProveedorSinAcceso (M). El API usa un solo responsableId/ResponsableRef;
+      el {xor} de A se descarta. Un reporte tiene a lo más un responsable (RF-06).
+  D3  Propietario es un objeto de valor dentro de Unidad (API Unit.propietario).
+  D4  Un solo Adjunto con tipo y etapa (A, API FileRef); sin subclases de foto/video.
+  D5  Garantía, "terminado sin evidencia" y "pendientes" son por ciclo (M; API Ciclo).
+  D6  Aviso se divide en AvisoSistema y EnvioCorreo (API Notification / EmailDelivery).
+  D7  El historial es EntradaHistorial de solo inserción con VersionCorreccion
+      (campo, valorAnterior, valorNuevo), no con copias completas (A, API HistoryEntry).
+  D8  Pagador = Condominio | Condomino (SRS RF-20; M, A). monto es opcional (RF-20).
+end note
+
+note as N2
+  <b>Reglas de integridad clave</b>
+  - Si Reporte.reportante es nulo, nombreReferencia es obligatorio (RF-04).
+  - Reporte.parteAfectada aplica a unidades y Reporte.referencia a áreas comunes (RD-13).
+  - Reporte.subtipo debe pertenecer a Reporte.categoria (RD-01).
+  - Adjunto {xor}: pertenece al Reporte (etapa Alta) o a un CicloAtencion
+    (etapa Evidencia): 1 a 5 al terminar; 0 solo con la excepción de RD-09 (RF-08).
+  - Un reporte reabierto crea un CicloAtencion nuevo, nunca un Reporte nuevo (RF-19).
+  - EntradaHistorial, Adjunto, Costo y Detencion son de solo inserción;
+    una corrección crea una entrada nueva (RNF-07).
+  - Delegacion.auxiliar debe tener perfilAdministracion = Auxiliar;
+    otorgadaPor, perfil Administrador (RF-21).
+  - CambioParametro.modificadoPor es Administrador (RF-27).
+end note
+
+note as N3
+  <b>Proyecciones del historial (no son clases)</b>
+  TipoEntradaHistorial.Detencion y Reanudacion salen de Detencion
+  (fechaInicio, fechaFin); Confirmacion de ConfirmacionResidente;
+  AvisoEnviado de Aviso (canal = AvisoSistema | EnvioCorreo);
+  Delegacion de Delegacion; UnionDuplicado y MarcaDuplicado de las
+  asociaciones reportePrincipal y posibleDuplicadoDe.
+  <b>Derivados</b>: incidencias recurrentes, tiempos y cumplimiento
+  (GET /metrics), detenido, mensajeAcceso, montoCosto, pagador.
+end note
+
+Reporte .. N1
+Reporte .. N2
+EntradaHistorial .. N3
+
+@enduml
