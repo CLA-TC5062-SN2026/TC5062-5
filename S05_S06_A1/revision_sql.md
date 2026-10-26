@@ -117,7 +117,7 @@ Revisión de la Parte 2 (servicios CRUD en `backend/`, FastAPI + SQLite) contra 
 ## 5. Cómo reproducir
 
 ```bash
-cd backend
+cd backend/
 pip install -r requirements.txt && cp .env.example .env
 python scripts/init_db.py --reset --demo
 python -m app.main                      # otra terminal:
