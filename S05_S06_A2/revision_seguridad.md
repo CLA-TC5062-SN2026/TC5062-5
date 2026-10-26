@@ -53,7 +53,7 @@ Dentro de una ruta permitida siguen las reglas que ya existían: solo el perfil 
 
 ### 3.2 Pruebas manuales (curl)
 
-Ejecutadas el 25-oct-2026 con el servidor en `http://127.0.0.1:8000` y la BD recién creada (`python scripts/init_db.py --reset --demo`). Script: `S05_S06_A2/pruebas_auth.sh`. Usuarios demo `*@reportaya.demo`, contraseña `Demo1234!`. Los tokens se abrevian como `<token>`.
+Ejecutadas el 25-oct-2026 con el servidor en `http://127.0.0.1:8000` y la BD recién creada (`python scripts/init_db.py --reset --demo`). Comandos curl (la petición de cada caso está en la tabla); el flujo del video usa la colección de Postman `S05_S06_A2/pruebas_auth.json`. Usuarios demo `*@reportaya.demo`, contraseña `Demo1234!`. Los tokens se abrevian como `<token>`.
 
 | # | Caso | Petición | Esperado | Obtenido |
 |---|---|---|---|---|
