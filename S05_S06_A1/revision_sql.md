@@ -72,7 +72,7 @@ Método: comparé el DDL con el diagrama mediante un script (clases ↔ tablas, 
 
 # Correcciones al código generado
 
-Revisión de la Parte 2 (servicios CRUD en `reportaya_api/`, FastAPI + SQLite) contra `openapi_equipo.yaml`. Método: el script `tests/test_contrato.py` levanta flujos reales contra el servidor y, **en cada respuesta**, comprueba que (1) el código HTTP esté declarado para esa operación, (2) el cuerpo cumpla el schema del YAML y (3) estén los encabezados `Location`/`ETag` que el YAML declara. También compara el conjunto de rutas y métodos del servidor con el del YAML.
+Revisión de la Parte 2 (servicios CRUD en `backend/`, FastAPI + SQLite) contra `openapi_equipo.yaml`. Método: el script `tests/test_contrato.py` levanta flujos reales contra el servidor y, **en cada respuesta**, comprueba que (1) el código HTTP esté declarado para esa operación, (2) el cuerpo cumpla el schema del YAML y (3) estén los encabezados `Location`/`ETag` que el YAML declara. También compara el conjunto de rutas y métodos del servidor con el del YAML.
 
 **Resultado final:** 46 de las 69 operaciones implementadas, 0 rutas que no estén en el YAML, 46/46 ejercitadas, 697 verificaciones y 0 fallos. Se confirmó la conexión a la BD con `GET /health` (`llavesForaneas: true`), y `PRAGMA integrity_check` y `foreign_key_check` quedaron limpios tras las pruebas.
 
@@ -117,7 +117,7 @@ Revisión de la Parte 2 (servicios CRUD en `reportaya_api/`, FastAPI + SQLite) c
 ## 5. Cómo reproducir
 
 ```bash
-cd reportaya_api
+cd backend
 pip install -r requirements.txt && cp .env.example .env
 python scripts/init_db.py --reset --demo
 python -m app.main                      # otra terminal:
