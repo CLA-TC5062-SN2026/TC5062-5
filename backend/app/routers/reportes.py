@@ -18,8 +18,9 @@ from datetime import date
 from .. import config, schemas as S
 from ..db import get_db, tx
 from ..serial import (COST_SQL, NOTE_SQL, cost_out, hold_out, note_out, report_detail, report_summary, ubicacion_out, b)
-from ..util import (FOLIO_RE, actor, conflicto, day_end_utc, day_start_utc, new_id, no_encontrado, now_utc, out_dt,
+from ..util import (FOLIO_RE, conflicto, day_end_utc, day_start_utc, new_id, no_encontrado, now_utc, out_dt,
                     paginacion, prohibido, responder, to_utc, validacion, verificar_if_match, peticion_invalida)
+from ..security import actor
 
 router = APIRouter()
 FolioP = Path(..., pattern=FOLIO_RE)

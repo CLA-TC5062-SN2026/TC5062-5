@@ -233,3 +233,21 @@ def no_vacio(valor: Optional[str], campo: str) -> str:
     if valor is None or not valor.strip():
         raise validacion(campo, "No puede estar vacío")
     return valor.strip()
+
+
+# ---------------------------------------------------------------- autenticación (S05-S06-A2)
+class Credenciales(Base):
+    correo: str
+    password: str
+
+
+class Registro(Base):
+    """Auto-registro de un Residente. NO acepta `rol`: extra="forbid" rechaza cualquier campo extra (400),
+    así nadie puede registrarse como Administracion."""
+    nombre: str
+    correo: str
+    password: str
+    unidadId: str
+    ocupacion: Ocupacion
+    v_correo = field_validator("correo")(_email)
+    v_uuid = field_validator("unidadId")(_uuid)

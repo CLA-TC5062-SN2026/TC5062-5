@@ -189,6 +189,87 @@ paths:
         '422': {$ref: '#/components/responses/Unprocessable'}
         '500': {$ref: '#/components/responses/ServerError'}
 
+  /auth/register:
+    post:
+      tags: [Autenticación]
+      summary: Registrarse como Residente (actividad S05-S06-A2)
+      description: |-
+        Registro público con contraseña (bcrypt). **Siempre crea un Residente activo** vinculado a una unidad existente:
+        el cuerpo no acepta `rol` (cualquier campo extra responde 400), para que nadie pueda registrarse como
+        Administración. La respuesta nunca incluye la contraseña ni su hash.
+        Nota: el SRS excluye el auto-registro (EX-08: las cuentas las da de alta Administración en `POST /users`);
+        este endpoint lo exige la actividad S05-S06-A2 y se limita al rol de menor privilegio.
+      operationId: register
+      security: []
+      x-roles: [público]
+      x-requirements: [RNF-06]
+      x-idempotent: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Registro'}
+      responses:
+        '201':
+          description: Residente creado y activo (sin contraseña en la respuesta).
+          headers: {Location: {$ref: '#/components/headers/Location'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/User'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '422':
+          description: Validación (correo ya registrado, contraseña de menos de 8 caracteres, unidad inexistente o desactivada).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /auth/login:
+    post:
+      tags: [Autenticación]
+      summary: Iniciar sesión y obtener el JWT (actividad S05-S06-A2)
+      description: Equivalente a `POST /sessions`, pero responde 200 como pide la actividad. El token expira a los `JWT_EXPIRATION` minutos (30, RNF-06). Tras 5 intentos fallidos la cuenta se bloquea 15 min y se responde el mismo 401.
+      operationId: login
+      security: []
+      x-roles: [público]
+      x-acceptance-criteria: [RF-01-AC-1, RF-01-AC-2]
+      x-idempotent: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Credenciales'}
+      responses:
+        '200':
+          description: Credenciales correctas; JWT, vigencia en segundos y datos del usuario.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Sesion'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401':
+          description: «Correo o contraseña incorrectos» (sin indicar cuál falló), cuenta no activa o bloqueada temporalmente.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+              example: {codigo: CREDENCIALES_INVALIDAS, mensaje: Correo o contraseña incorrectos}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '500': {$ref: '#/components/responses/ServerError'}
+  /auth/me:
+    get:
+      tags: [Autenticación]
+      summary: Datos del usuario autenticado (a partir del JWT)
+      operationId: getMe
+      x-roles: [Residente, Vigilancia, Mantenimiento, Administración]
+      x-acceptance-criteria: [RF-01-AC-1]
+      x-idempotent: true
+      responses:
+        '200':
+          description: Usuario del token.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SesionUsuario'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '500': {$ref: '#/components/responses/ServerError'}
+
   # ================= Unidades =================
   /units:
     get:
@@ -2120,6 +2201,16 @@ components:
         perfilAdministracion: {type: string, enum: [Administrador, Auxiliar], description: Solo para el rol Administracion.}
         delegacionVigente: {type: boolean, description: Solo para la Auxiliar.}
         unidad: {$ref: '#/components/schemas/Unit'}
+    Registro:
+      type: object
+      additionalProperties: false
+      required: [nombre, correo, password, unidadId, ocupacion]
+      properties:
+        nombre: {type: string, minLength: 1}
+        correo: {type: string, format: email}
+        password: {type: string, format: password, minLength: 8, description: 'Máximo 72 bytes (límite de bcrypt).'}
+        unidadId: {type: string, format: uuid}
+        ocupacion: {$ref: '#/components/schemas/Ocupacion'}
     TokenPassword:
       type: object
       required: [token, password]

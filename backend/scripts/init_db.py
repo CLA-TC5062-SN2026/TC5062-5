@@ -61,6 +61,9 @@ def main():
     conn.close()
 
 
+PASSWORD_DEMO = "Demo1234!"  # solo para datos de ejemplo locales
+
+
 def demo(conn):
     if conn.execute("SELECT 1 FROM usuario LIMIT 1").fetchone():
         print("Ya hay usuarios; no se cargan datos de ejemplo.")
@@ -70,9 +73,11 @@ def demo(conn):
                 ("vig", "Víctor Vigilante", "vigilancia@reportaya.demo", "Vigilancia"),
                 ("mant", "Mateo Mantenimiento", "mantenimiento@reportaya.demo", "Mantenimiento"),
                 ("res", "Rosa Residente", "residente@reportaya.demo", "Residente")]
+    from app.security import hash_password
+    h = hash_password(PASSWORD_DEMO)  # bcrypt real (antes: 'hash-demo', con el que nadie podía iniciar sesión)
     for k, nombre, correo, rol in usuarios:
-        conn.execute("INSERT INTO usuario (id, nombre, correo, rol, estado_cuenta, contrasena_hash) VALUES (?,?,?,?, 'Activa', 'hash-demo')",
-                     (uid("u:" + k), nombre, correo, rol))
+        conn.execute("INSERT INTO usuario (id, nombre, correo, rol, estado_cuenta, contrasena_hash) VALUES (?,?,?,?, 'Activa', ?)",
+                     (uid("u:" + k), nombre, correo, rol, h))
     conn.execute("INSERT INTO usuario_administracion VALUES (?, 'Administracion', 'Administrador')", (uid("u:admin"),))
     conn.execute("INSERT INTO usuario_administracion VALUES (?, 'Administracion', 'Auxiliar')", (uid("u:aux"),))
     conn.execute("INSERT INTO vigilante (usuario_id) VALUES (?)", (uid("u:vig"),))
@@ -100,7 +105,8 @@ def demo(conn):
     conn.execute("INSERT INTO aviso (id, tipo, reporte_folio, evento, fecha) VALUES (?, 'Correo', 'RY-000001', 'ReporteCreado', ?)", (uid("av:2"), T))
     conn.execute("INSERT INTO envio_correo (aviso_id, destinatario) VALUES (?, 'pedro@example.com')", (uid("av:2"),))
     conn.commit()
-    print("Datos de ejemplo cargados. Administrador (actor por defecto):", uid("u:admin"))
+    print("Datos de ejemplo cargados. Usuarios *@reportaya.demo (admin, auxiliar, vigilancia, mantenimiento, residente)"
+          f" con contraseña {PASSWORD_DEMO!r}. Unidad B-502: {uid('unidad:B-502')}")
 
 
 if __name__ == "__main__":

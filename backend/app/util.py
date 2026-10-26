@@ -6,11 +6,10 @@ import uuid
 from datetime import date, datetime, time, timezone
 from typing import Any
 
-from fastapi import Depends, Header, Query
+from fastapi import Query
 from fastapi.responses import JSONResponse
 
 from . import config
-from .db import get_db
 
 UUID_RE = r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 FOLIO_RE = r"^RY-\d{6}$"
@@ -128,23 +127,6 @@ def pagina(db, sql_from: str, params: list, select: str, order: str, pg: tuple[i
     filas = db.execute(f"SELECT {select} {sql_from} ORDER BY {order} LIMIT ? OFFSET ?",
                        params + [size, (page - 1) * size]).fetchall()
     return {"items": [mapper(f) for f in filas], "pagination": {"page": page, "pageSize": size, "total": total}}
-
-
-# ---------------------------------------------------------------- actor
-def actor(db=Depends(get_db), x_actor_id: str | None = Header(default=None)):
-    """Quién ejecuta la acción. SIN seguridad en esta entrega (la autenticación JWT es la siguiente
-    actividad): se toma del encabezado X-Actor-Id o, si falta, el primer Administrador activo."""
-    if x_actor_id:
-        fila = db.execute("SELECT * FROM usuario WHERE id = ?", (x_actor_id,)).fetchone()
-        if not fila:
-            raise peticion_invalida("X-Actor-Id no corresponde a un usuario")
-    else:
-        fila = db.execute(
-            """SELECT u.* FROM usuario u JOIN usuario_administracion a ON a.usuario_id = u.id
-               WHERE a.perfil_administracion = 'Administrador' ORDER BY u.rowid LIMIT 1""").fetchone()
-        if not fila:
-            raise peticion_invalida("No hay usuario actor: envíe X-Actor-Id o ejecute scripts/init_db.py --demo")
-    return fila
 
 
 def es_administrador(db, usuario_id: str) -> bool:

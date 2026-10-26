@@ -7,8 +7,9 @@ from fastapi import APIRouter, Body, Depends, Header, Path, Query
 from .. import schemas as S
 from ..db import get_db, tx
 from ..serial import UNIT_SQL, b, delegation_out, provider_out, user_out, vinculacion_out
-from ..util import (UUID_RE, actor, es_administrador, new_id, no_encontrado, now_utc, pagina, paginacion, prohibido,
+from ..util import (UUID_RE, es_administrador, new_id, no_encontrado, now_utc, pagina, paginacion, prohibido,
                     responder, to_utc, validacion, verificar_if_match, conflicto)
+from ..security import actor
 
 router = APIRouter()
 UserId = Path(..., pattern=UUID_RE)

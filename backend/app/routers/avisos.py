@@ -6,7 +6,8 @@ from fastapi import APIRouter, Body, Depends, Path, Query
 from .. import schemas as S
 from ..db import get_db, tx
 from ..serial import b
-from ..util import FOLIO_RE, UUID_RE, actor, no_encontrado, out_dt, pagina, paginacion, responder
+from ..util import FOLIO_RE, UUID_RE, no_encontrado, out_dt, pagina, paginacion, responder
+from ..security import actor
 
 router = APIRouter()
 

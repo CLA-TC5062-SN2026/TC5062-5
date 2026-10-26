@@ -28,7 +28,10 @@ sys.path.insert(0, str(RAIZ))
 from app import config  # noqa: E402
 
 PREFIX = config.API_PREFIX
-SPEC = yaml.safe_load((RAIZ / "openapi_equipo.yaml").read_text(encoding="utf-8"))
+_YAML = RAIZ / "openapi_equipo.yaml"
+if not _YAML.exists():  # en el repo, el contrato vive en S05_S06_A1/
+    _YAML = RAIZ.parent / "S05_S06_A1" / "openapi_equipo.yaml"
+SPEC = yaml.safe_load(_YAML.read_text(encoding="utf-8"))
 OPS = {}
 for p, item in SPEC["paths"].items():
     for m, o in item.items():
@@ -52,6 +55,8 @@ def _nullable(n):
 COMPONENTS = _nullable(SPEC["components"])
 S = requests.Session()
 fallos, cubiertos, n_checks = [], set(), 0
+TOKENS = {}  # id de usuario -> JWT (S05-S06-A2: el actor sale del token, ya no de X-Actor-Id)
+PASSWORD_DEMO = "Demo1234!"
 
 
 def check(cond, msg):
@@ -81,6 +86,9 @@ def llamar(metodo, plantilla, esperado, params=None, headers=None, **kw):
     ruta = plantilla
     for k, v in (params or {}).items():
         ruta = ruta.replace("{" + k + "}", str(v))
+    if headers and "X-Actor-Id" in headers:  # actuar como otro usuario = usar su token
+        headers = dict(headers)
+        headers["Authorization"] = "Bearer " + TOKENS[headers.pop("X-Actor-Id")]
     r = S.request(metodo, BASE + PREFIX + ruta, headers=headers, **kw)
     op = OPS.get((metodo, plantilla))
     ident = f"{metodo} {plantilla}"
@@ -169,7 +177,29 @@ def main():
     res = sel("SELECT id FROM usuario WHERE correo='residente@reportaya.demo'")[0]
     vig = sel("SELECT id FROM usuario WHERE correo='vigilancia@reportaya.demo'")[0]
     mant = sel("SELECT id FROM usuario WHERE correo='mantenimiento@reportaya.demo'")[0]
-    cats = {c["nombre"]: c for c in requests.get(f"{BASE}{PREFIX}/categories").json()}
+
+    print("== Autenticación (S05-S06-A2)")
+    for k in ("admin", "auxiliar", "residente", "vigilancia", "mantenimiento"):
+        r = llamar("POST", "/auth/login", 200, json={"correo": f"{k}@reportaya.demo", "password": PASSWORD_DEMO})
+        TOKENS[r.json()["usuario"]["id"]] = r.json()["token"]
+    llamar("POST", "/auth/login", 401, json={"correo": "admin@reportaya.demo", "password": "incorrecta"})
+    llamar("POST", "/auth/login", 401, json={"correo": "nadie@reportaya.demo", "password": "incorrecta"})
+    llamar("GET", "/auth/me", 401)
+    S.headers["Authorization"] = "Bearer " + TOKENS[admin]   # actor por omisión: el Administrador
+    me = llamar("GET", "/auth/me", 200).json(); check(me["id"] == admin and me["rol"] == "Administracion", "auth/me: usuario del token")
+    reg = {"nombre": "Nuevo Residente", "correo": f"reg{ident}@example.com", "password": "Secreta123",
+           "unidadId": sel("SELECT ubicacion_id FROM unidad WHERE torre='B' AND numero='502'")[0], "ocupacion": "Inquilino"}
+    r = llamar("POST", "/auth/register", 201, json=reg)
+    check(r.json()["rol"] == "Residente" and "password" not in r.json() and "contrasenaHash" not in r.json(), "register: Residente y sin contraseña")
+    llamar("POST", "/auth/register", 422, json=reg)                                                   # correo repetido
+    llamar("POST", "/auth/register", 400, json={**reg, "correo": f"x{ident}@example.com", "rol": "Administracion"})  # no se elige rol
+    llamar("POST", "/auth/register", 422, json={**reg, "correo": f"y{ident}@example.com", "password": "corta"})
+    llamar("POST", "/auth/login", 200, json={"correo": reg["correo"], "password": reg["password"]})
+    r = requests.get(f"{BASE}{PREFIX}/users"); check(r.status_code == 401, "sin token -> 401")
+    r = requests.get(f"{BASE}{PREFIX}/users", headers={"Authorization": "Bearer " + TOKENS[admin][:-2] + "xx"}); check(r.status_code == 401, "token alterado -> 401")
+    r = requests.get(f"{BASE}{PREFIX}/users", headers={"Authorization": "Bearer " + TOKENS[res]}); check(r.status_code == 403, "rol incorrecto -> 403")
+
+    cats = {c["nombre"]: c for c in S.get(f"{BASE}{PREFIX}/categories").json()}
     cat_fugas, cat_imper, cat_elec = cats["Plomería y fugas"], cats["Impermeabilización"], cats["Electricidad"]
     J = {"Content-Type": "application/json"}
 
@@ -337,7 +367,7 @@ def main():
     llamar("PATCH", "/reports/{folio}", 200, {"folio": folio}, headers=con_if_match(g), data='{}')   # sin cambios: idempotente
     llamar("PATCH", "/reports/{folio}", 404, {"folio": "RY-999999"}, headers={"If-Match": "*", "Content-Type": "application/merge-patch+json"}, data="{}")
     llamar("DELETE", "/reports/{folio}", 403, {"folio": folio})
-    llamar("DELETE", "/reports/{folio}", 404, {"folio": "RY-999999"})
+    llamar("DELETE", "/reports/{folio}", 403, {"folio": "RY-999999"})   # S05-S06-A2: el rol se valida antes que la existencia (no revela qué folios existen)
     h = llamar("GET", "/reports/{folio}/history", 200, {"folio": folio})
     tipos = [i["tipo"] for i in h.json()["items"]]
     check(tipos[0] == "CambioEstado" and tipos.count("Correccion") >= 3, f"reports: historial con alta y versiones de corrección {tipos}")

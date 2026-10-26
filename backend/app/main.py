@@ -1,21 +1,25 @@
-"""ReportaYa API — servicios CRUD (Parte 2). Sin seguridad: JWT y roles son la siguiente actividad."""
+"""ReportaYa API — servicios CRUD con autenticación JWT y control de acceso por rol (S05-S06-A2)."""
 import logging
 import sqlite3
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import config
-from .routers import avisos, catalogo, reportes, usuarios
+from .routers import auth, avisos, catalogo, reportes, usuarios
+from .security import autorizar
 from .util import ApiError
 
 log = logging.getLogger("reportaya")
 
 app = FastAPI(title="ReportaYa API", version="1.0.0", docs_url="/docs", openapi_url=f"{config.API_PREFIX}/openapi.json")
+# Público: /auth/register y /auth/login. Protegido: /auth/me (usuario_actual) y TODOS los routers CRUD
+# (autorizar = JWT válido + rol permitido según x-roles del openapi_equipo.yaml).
+app.include_router(auth.router, prefix=config.API_PREFIX)
 for r in (catalogo.router, usuarios.router, reportes.router, avisos.router):
-    app.include_router(r, prefix=config.API_PREFIX)
+    app.include_router(r, prefix=config.API_PREFIX, dependencies=[Depends(autorizar)])
 
 
 def _error(status: int, codigo: str, mensaje: str, errores=None) -> JSONResponse:
