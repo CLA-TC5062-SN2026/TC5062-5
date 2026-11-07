@@ -1,0 +1,44 @@
+@import 'tailwindcss';
+
+/*
+ * Tema de ReportaYa (decision_stack_frontend.md, RNF-09).
+ * Las pantallas usan SOLO estos colores: cada par texto/fondo se verificó con una relación de contraste >= 4.5:1
+ * (WCAG 2.1 AA) sobre --color-fondo y --color-superficie. Si se agrega un color, verifique su contraste antes.
+ *
+ *   texto        #1f2937 sobre blanco ≈ 14.7:1
+ *   texto-suave  #4b5563 sobre blanco ≈  7.6:1
+ *   primario     #1d4ed8 sobre blanco ≈  6.7:1 (y texto blanco sobre primario)
+ *   exito        #15803d sobre blanco ≈  5.0:1
+ *   error        #b91c1c sobre blanco ≈  6.5:1
+ *   aviso        #92400e sobre blanco ≈  7.1:1
+ */
+@theme {
+  --color-fondo: #ffffff;
+  --color-superficie: #f3f4f6;
+  --color-borde: #d1d5db;
+  --color-texto: #1f2937;
+  --color-texto-suave: #4b5563;
+  --color-primario: #1d4ed8;
+  --color-primario-oscuro: #1e40af;
+  --color-exito: #15803d;
+  --color-error: #b91c1c;
+  --color-aviso: #92400e;
+
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+@layer base {
+  html {
+    /* Tamaño base de 16 px (RNF-09) respetando el ajuste de tamaño de letra del usuario. */
+    font-size: 100%;
+  }
+
+  body {
+    @apply bg-fondo font-sans text-base text-texto antialiased;
+  }
+
+  /* Foco visible para navegación con teclado. */
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-primario;
+  }
+}
