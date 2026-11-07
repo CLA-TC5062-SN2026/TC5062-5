@@ -1,6 +1,6 @@
 # ReportaYa — frontend
 
-React + TypeScript · Vite · Tailwind CSS · React Router · TanStack Query. Justificación: `decision_stack_frontend.md`.
+React + TypeScript · Vite · Tailwind CSS · React Router · TanStack Query. Justificación: `../S07_S08_A1/decision_stack_frontend.md`.
 
 ## Puesta en marcha
 

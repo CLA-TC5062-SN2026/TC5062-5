@@ -5,7 +5,7 @@ import { RouterProvider } from 'react-router/dom'
 import './index.css'
 import { router } from './router'
 
-// Caché de datos del servidor (decision_stack_frontend.md): una sola instancia para toda la app.
+// Caché de datos del servidor (S07_S08_A1/decision_stack_frontend.md): una sola instancia para toda la app.
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: { staleTime: 30_000, refetchOnWindowFocus: false },

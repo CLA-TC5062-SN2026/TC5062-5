@@ -1,7 +1,7 @@
 @import 'tailwindcss';
 
 /*
- * Tema de ReportaYa (decision_stack_frontend.md, RNF-09).
+ * Tema de ReportaYa (S07_S08_A1/decision_stack_frontend.md, RNF-09).
  * Las pantallas usan SOLO estos colores: cada par texto/fondo se verificó con una relación de contraste >= 4.5:1
  * (WCAG 2.1 AA) sobre --color-fondo y --color-superficie. Si se agrega un color, verifique su contraste antes.
  *
