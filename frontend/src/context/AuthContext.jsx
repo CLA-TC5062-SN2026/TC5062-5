@@ -1,35 +1,35 @@
-import { createContext, useContext, useState } from 'react'
-import { api } from '../services/api.js'
+import { createContext, useContext, useEffect, useState } from 'react'
+import { EVENTO_SESION_EXPIRADA } from '../services/apiClient.js'
+import { authService } from '../services/authService.js'
 
 const AuthContext = createContext(null)
-const CLAVE = 'reportaya.sesion'
-
-// sessionStorage: sobrevive a recargar la página, pero se borra al cerrar la pestaña.
-function leerSesion() {
-  try {
-    return JSON.parse(sessionStorage.getItem(CLAVE))
-  } catch {
-    return null
-  }
-}
 
 export function AuthProvider({ children }) {
-  const [sesion, setSesion] = useState(leerSesion) // { token, usuario }
+  const [sesion, setSesion] = useState(() => authService.sesionActual()) // { token, usuario, expiraEn }
+  const [aviso, setAviso] = useState('') // motivo por el que se cerró la sesión, para mostrarlo en el login
+
+  // El apiClient emite este evento cuando el backend responde 401 a una petición con token.
+  useEffect(() => {
+    const expirar = () => {
+      setSesion(null)
+      setAviso('Tu sesión expiró. Inicia sesión de nuevo.')
+    }
+    window.addEventListener(EVENTO_SESION_EXPIRADA, expirar)
+    return () => window.removeEventListener(EVENTO_SESION_EXPIRADA, expirar)
+  }, [])
 
   async function login(correo, password) {
-    const datos = await api('/auth/login', { method: 'POST', body: JSON.stringify({ correo, password }) })
-    const nueva = { token: datos.token, usuario: datos.usuario }
-    sessionStorage.setItem(CLAVE, JSON.stringify(nueva))
-    setSesion(nueva)
+    setSesion(await authService.login(correo, password))
+    setAviso('')
   }
 
   function logout() {
-    sessionStorage.removeItem(CLAVE)
+    authService.logout()
     setSesion(null)
   }
 
   return (
-    <AuthContext.Provider value={{ token: sesion?.token, usuario: sesion?.usuario, login, logout }}>
+    <AuthContext.Provider value={{ token: sesion?.token, usuario: sesion?.usuario, aviso, login, logout }}>
       {children}
     </AuthContext.Provider>
   )
