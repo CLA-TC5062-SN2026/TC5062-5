@@ -1,0 +1,43 @@
+== Conexión: {'estado': 'ok', 'baseDeDatos': 'reportaya.db', 'tablas': 33, 'llavesForaneas': True}
+== Rutas del servidor vs YAML
+   YAML: 72 operaciones · servidor: 49 · implementadas del YAML: 49
+== Autenticación (S05-S06-A2)
+== Unidades
+== Áreas comunes
+== Proveedores sin acceso
+== Usuarios
+== Delegaciones
+== Parámetros
+== Reportes
+== Notas, detenciones, costos, visita (reporte en Asignado)
+== Persistencia (reporte Cerrado)
+== Avisos
+== Errores generales
+
+== Resumen
+   Operaciones del YAML ejercitadas: 49 de 72
+   Verificaciones: 759 · fallos: 0
+   Operaciones del YAML NO implementadas (fuera del alcance CRUD de esta entrega):
+      POST   /account-activations
+      GET    /metrics
+      POST   /password-reset-requests
+      POST   /password-resets
+      POST   /reports/{folio}/assignments
+      POST   /reports/{folio}/cancellations
+      PATCH  /reports/{folio}/classification
+      POST   /reports/{folio}/closures
+      POST   /reports/{folio}/completions
+      POST   /reports/{folio}/cycles
+      DELETE /reports/{folio}/duplicate-flag
+      GET    /reports/{folio}/files
+      DELETE /reports/{folio}/files/{fileId}
+      GET    /reports/{folio}/files/{fileId}
+      POST   /reports/{folio}/files/{fileId}/shares
+      POST   /reports/{folio}/merges
+      POST   /reports/{folio}/reopenings
+      POST   /reports/{folio}/resident-responses
+      PUT    /reports/{folio}/warranty
+      POST   /sessions
+      DELETE /sessions/current
+      GET    /sessions/current
+      POST   /users/{userId}/activation-links
