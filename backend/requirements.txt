@@ -7,3 +7,4 @@ bcrypt>=4.1
 PyJWT>=2.8
 reportlab>=4.0      # exportación del tablero a PDF (RF-23)
 boto3>=1.34         # almacén S3 compatible (RNF-08, ALMACEN=s3)
+httpx>=0.27         # scripts/cargar_demo.py usa el cliente de prueba de FastAPI para cargar la demo
