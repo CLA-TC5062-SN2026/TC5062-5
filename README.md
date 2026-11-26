@@ -195,7 +195,7 @@ Los valores reales van en `.env`, que **no se versiona**. Las plantillas son `ba
 
 ## Aplicación en producción
 
-> **URL: «URL_RENDER»** · demo pública en Render (plan gratuito). Entre con cualquiera de los usuarios de la tabla anterior y la contraseña `Demo1234!`.
+> **URL: https://reportaya-6guv.onrender.com** · demo pública en Render (plan gratuito). Entre con cualquiera de los usuarios de la tabla anterior y la contraseña `Demo1234!`.
 >
 > Es una demostración con datos ficticios: el plan gratuito duerme el servicio tras 15 minutos sin uso (la primera visita tarda alrededor de un minuto en despertarlo) y su disco no persiste, así que **la demo se vuelve a cargar en cada arranque** y lo que se capture se pierde al reiniciarse. Para operar el condominio con datos reales se usa el despliegue con Docker Compose de la sección siguiente.
 
@@ -207,7 +207,7 @@ Los valores reales van en `.env`, que **no se versiona**. Las plantillas son `ba
 
 1. En [render.com](https://render.com): **New → Blueprint** y elija este repositorio (o **New → Web Service → Public Git Repository** con su URL, runtime Docker y `Dockerfile.render`).
 2. Render lee `render.yaml`: crea el servicio `reportaya` en el plan gratuito, genera `JWT_SECRET` y deja `DEMO_AL_INICIAR=1`.
-3. Cada push a `main` vuelve a desplegar. HTTPS lo pone Render (RNF-06).
+3. Con Blueprint, cada push a `main` vuelve a desplegar. La demo actual se creó como Public Git Repository, así que se vuelve a desplegar desde el panel de Render con **Manual Deploy → Deploy latest commit**. HTTPS lo pone Render (RNF-06).
 
 Sin `DEMO_AL_INICIAR`, el arranque crea la base vacía y, si se definen `ADMIN_CORREO` y `ADMIN_NOMBRE`, el primer Administrador. Para que esos datos sobrevivan a un reinicio hace falta un disco persistente de Render (plan de pago) montado en `/data`.
 
@@ -236,7 +236,7 @@ docker compose run --rm respaldo python scripts/respaldo.py restaurar /respaldos
 docker compose start api
 ```
 
-> Las imágenes de Docker no se pudieron construir en el entorno donde se prepararon, porque no tenía acceso a Docker Hub. Lo que corre dentro de ellas sí se probó fuera de Docker: el arranque de Render con la demo y la SPA servida por el API, y el respaldo con su restauración. GitHub Actions construye las imágenes en cada push.
+> GitHub Actions construye las imágenes de Docker Compose en cada push, y Render construye `Dockerfile.render` en cada despliegue.
 
 ## Capturas de las vistas principales
 
