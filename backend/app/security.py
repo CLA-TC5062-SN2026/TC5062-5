@@ -8,6 +8,8 @@
   esté en `PERMISOS` para la ruta (x-roles del openapi_equipo.yaml); si no -> 403. Una ruta que no esté en la
   tabla se rechaza (falla cerrada).
 """
+
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
@@ -60,22 +62,45 @@ def no_autenticado() -> ApiError:
 _bearer = HTTPBearer(auto_error=False)  # auto_error=False: respondemos nosotros con 401 y el esquema Error
 
 
-def usuario_actual(cred: HTTPAuthorizationCredentials | None = Depends(_bearer), db=Depends(get_db)):
+@dataclass(frozen=True)
+class UsuarioSesion:
+    """Lo único que los endpoints necesitan del usuario autenticado (ISP). El hash de la contraseña,
+    los intentos fallidos y el bloqueo nunca salen de este módulo."""
+
+    id: str
+    nombre: str
+    rol: str
+
+    @classmethod
+    def de_fila(cls, fila) -> "UsuarioSesion":
+        return cls(fila["id"], fila["nombre"], fila["rol"])
+
+
+def usuario_actual(
+    request: Request, cred: HTTPAuthorizationCredentials | None = Depends(_bearer), db=Depends(get_db)
+) -> UsuarioSesion:
     """Usuario autenticado a partir del JWT. Reemplaza al encabezado X-Actor-Id de la entrega anterior."""
     if cred is None or cred.scheme.lower() != "bearer":
         raise no_autenticado()
     try:
-        payload = jwt.decode(cred.credentials, config.JWT_SECRET,
-                             algorithms=[config.JWT_ALGORITHM],          # fijo: evita alg=none / confusión de algoritmo
-                             options={"require": ["exp", "iat", "sub"]})
+        payload = jwt.decode(
+            cred.credentials,
+            config.JWT_SECRET,
+            algorithms=[config.JWT_ALGORITHM],  # fijo: evita alg=none / confusión de algoritmo
+            options={"require": ["exp", "iat", "sub"]},
+        )
     except jwt.ExpiredSignatureError:
         raise ApiError(401, "SESION_EXPIRADA", "La sesión expiró; inicie sesión de nuevo")
     except jwt.InvalidTokenError:  # firma inválida, token mal formado, claims faltantes
         raise no_autenticado()
-    fila = db.execute("SELECT * FROM usuario WHERE id = ?", (payload["sub"],)).fetchone()
+    fila = db.execute("SELECT id, nombre, rol, estado_cuenta FROM usuario WHERE id = ?", (payload["sub"],)).fetchone()
     if not fila or fila["estado_cuenta"] != "Activa":
         raise no_autenticado()
-    return fila
+    # RNF-06: la sesión expira tras 30 minutos de INACTIVIDAD. Cada petición autenticada recibe un token
+    # renovado en el encabezado X-Token-Renovado; el cliente lo reemplaza y así el plazo corre desde la última
+    # actividad. Sin actividad durante JWT_EXPIRATION minutos, el token vence (401 SESION_EXPIRADA).
+    request.state.token_renovado = crear_token(fila)
+    return UsuarioSesion.de_fila(fila)
 
 
 # Quién ejecuta la acción: mismo nombre que usaban los routers (antes salía de X-Actor-Id).
@@ -133,6 +158,27 @@ PERMISOS: dict[tuple[str, str], frozenset[str]] = {
     ("POST", "/reports/{folio}/costs"): frozenset({ADMIN}),
     ("GET", "/reports/{folio}/persistence-indications"): frozenset({ADMIN}),
     ("POST", "/reports/{folio}/persistence-indications"): frozenset({RES}),
+    # Flujo de estados (S11)
+    ("POST", "/reports/{folio}/assignments"): frozenset({ADMIN}),
+    ("PATCH", "/reports/{folio}/classification"): frozenset({ADMIN}),
+    ("POST", "/reports/{folio}/cycles"): frozenset({MANT, ADMIN}),
+    ("POST", "/reports/{folio}/completions"): frozenset({MANT, ADMIN}),
+    ("PUT", "/reports/{folio}/warranty"): frozenset({MANT, ADMIN}),
+    ("POST", "/reports/{folio}/resident-responses"): frozenset({RES}),
+    ("POST", "/reports/{folio}/closures"): frozenset({ADMIN}),
+    ("POST", "/reports/{folio}/cancellations"): frozenset({RES, ADMIN}),
+    ("POST", "/reports/{folio}/reopenings"): frozenset({ADMIN}),
+    ("POST", "/reports/{folio}/merges"): frozenset({ADMIN}),
+    ("DELETE", "/reports/{folio}/duplicate-flag"): frozenset({ADMIN}),
+    # Archivos
+    ("GET", "/reports/{folio}/files"): TODOS,
+    ("GET", "/reports/{folio}/files/{fileId}"): TODOS,
+    ("DELETE", "/reports/{folio}/files/{fileId}"): frozenset(),  # nada se borra (RNF-07, RF-05-AC-7)
+    ("POST", "/reports/{folio}/files/{fileId}/shares"): frozenset({ADMIN}),
+    # Usuarios: enlace de activación nuevo (RF-14-AC-2)
+    ("POST", "/users/{userId}/activation-links"): frozenset({ADMIN}),
+    # Tablero (RF-13, RF-23)
+    ("GET", "/metrics"): frozenset({ADMIN}),
     # Avisos
     ("GET", "/notifications"): TODOS,
     ("PATCH", "/notifications/{notificationId}"): TODOS,
@@ -140,11 +186,11 @@ PERMISOS: dict[tuple[str, str], frozenset[str]] = {
 }
 
 
-def autorizar(request: Request, usuario=Depends(usuario_actual)):
+def autorizar(request: Request, usuario: UsuarioSesion = Depends(usuario_actual)) -> UsuarioSesion:
     """Dependencia de los routers protegidos: 401 sin token válido (usuario_actual), 403 si el rol no está
     autorizado para la operación."""
     ruta = request.scope["route"].path.removeprefix(config.API_PREFIX)
     roles = PERMISOS.get((request.method, ruta))
-    if roles is None or usuario["rol"] not in roles:
+    if roles is None or usuario.rol not in roles:
         raise prohibido()
     return usuario

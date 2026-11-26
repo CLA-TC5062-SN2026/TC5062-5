@@ -3,6 +3,7 @@
 Los cuerpos se reciben como JSON crudo y se validan DESPUÉS de comprobar que el recurso existe,
 para respetar la precedencia de errores del SRS: 404 antes que 422.
 """
+
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
@@ -13,8 +14,9 @@ import re
 Ocupacion = Literal["Propietario", "Inquilino"]
 Rol = Literal["Residente", "Vigilancia", "Mantenimiento", "Administracion"]
 Pagador = Literal["Condominio", "Condomino"]
-MotivoDetencion = Literal["AccesoAlDepartamento", "EsperaDeProveedor", "EsperaDePieza",
-                          "EsperaDeAutorizacionDeGasto", "Otro"]
+MotivoDetencion = Literal[
+    "AccesoAlDepartamento", "EsperaDeProveedor", "EsperaDePieza", "EsperaDeAutorizacionDeGasto", "Otro"
+]
 MedioOrigen = Literal["Sistema", "WhatsApp", "Llamada", "Caseta", "Correo", "Presencial"]
 
 
@@ -151,7 +153,7 @@ class ReportCreate(Base):
     subtipo: Optional[str] = None
     descripcion: str
     ubicacion: Ubicacion
-    esPeligroso: bool
+    esPeligroso: Optional[bool] = None  # obligatorio; se valida aparte para dar el mensaje de RF-03-AC-6
     autorizaAcceso: Optional[bool] = None
     horariosAcceso: Optional[str] = None
     desdeCuando: Optional[str] = None
@@ -205,10 +207,107 @@ class NotificationPatch(Base):
     leido: Literal[True]
 
 
+# ---------------------------------------------------------------- flujo de estados (S11)
+Prioridad = Literal["Urgente", "Normal", "Menor"]
+Responsabilidad = Literal["Comun", "Privada", "PorDeterminar"]
+
+
+class AssignRequest(Base):
+    # prioridad y responsableId son obligatorios; se declaran opcionales para responder con el mensaje del SRS
+    # («La prioridad es obligatoria», RF-06-AC-3) en lugar del genérico.
+    prioridad: Optional[Prioridad] = None
+    responsableId: Optional[str] = None
+    ubicacionOrigen: Optional[Ubicacion] = None
+    responsabilidad: Optional[Responsabilidad] = None
+    responsableCosto: Optional[Pagador] = None
+    v_uuid = field_validator("responsableId")(_uuid)
+
+
+class ReclassifyRequest(Base):
+    prioridad: Optional[Prioridad] = None
+    responsableId: Optional[str] = None
+    ubicacionOrigen: Optional[Ubicacion] = None
+    responsabilidad: Optional[Responsabilidad] = None
+    responsableCosto: Optional[Pagador] = None
+    v_uuid = field_validator("responsableId")(_uuid)
+
+
+class StartRequest(Base):
+    actuaEnNombreDe: Optional[str] = None
+    comentario: Optional[str] = None
+
+
+class CompletionData(Base):
+    notaTrabajo: Optional[str] = None
+    justificacionSinEvidencia: Optional[str] = None
+    garantiaVencimiento: Optional[str] = None
+    pendientes: Optional[str] = None
+
+
+class ResidentResponseCreate(Base):
+    respuesta: Literal["YaQuedo", "SigueFallando"]
+    comentario: Optional[str] = None
+
+
+class CloseRequest(Base):
+    motivo: Optional[str] = None
+
+
+class CancelRequest(Base):
+    motivo: Optional[str] = None
+
+
+class CommentRequest(Base):
+    comentario: Optional[str] = None
+
+
+class MergeRequest(Base):
+    reportePrincipal: str
+
+
+class WarrantyPut(Base):
+    garantiaVencimiento: str
+
+
+class ShareCreate(Base):
+    proveedorId: str
+    consentimientoResidente: Optional[bool] = None
+    v_uuid = field_validator("proveedorId")(_uuid)
+
+
+class TokenPassword(Base):
+    token: str
+    password: str
+
+
+class ResetRequest(Base):
+    correo: str
+
+
 _MSG = {
     "missing": "Campo obligatorio",
     "string_too_short": "No puede estar vacío o es demasiado corto",
     "literal_error": "Valor no permitido",
+}
+
+
+# Mensajes del SRS para campos obligatorios ausentes (SRS 3.0: «el mensaje que indica cada criterio»).
+MENSAJES_OBLIGATORIO = {
+    "piso": "El piso es obligatorio",  # RF-02-AC-6
+    "propietario.correo": "El correo del propietario es obligatorio",  # RF-02-AC-5
+    "propietario.nombre": "El nombre del propietario es obligatorio",
+    "descripcion": "La descripción debe tener entre 10 y 1,000 caracteres",
+    "motivo": "Indique el motivo de la detención",  # RF-18-AC-2 (HoldCreate)
+    "categoriaId": "Indique la categoría",
+    "ubicacion": "Indique la ubicación",
+    "correo": "El correo es obligatorio",
+    "password": "La contraseña es obligatoria",
+    "token": "El enlace no es válido",
+    "respuesta": "Indique «Ya quedó» o «Sigue fallando»",
+    "fechaVisita": "Indique la fecha de la visita",
+    "garantiaVencimiento": "Indique la fecha de vencimiento de la garantía",
+    "reportePrincipal": "Indique el reporte principal",
+    "proveedorId": "Indique el proveedor",
 }
 
 
@@ -220,13 +319,22 @@ def parsear(modelo: type[BaseModel], data: Any):
         return modelo.model_validate(data)
     except ValidationError as e:
         errores = e.errors()
-        if any(x["type"].endswith("_type") or x["type"] in ("extra_forbidden", "bool_type", "int_type")
-               for x in errores):
-            raise peticion_invalida("Tipo de dato incorrecto o campo desconocido: " +
-                                    ", ".join(".".join(map(str, x["loc"])) for x in errores))
-        raise ApiError(422, "VALIDACION", "Datos inválidos", [
-            {"campo": ".".join(map(str, x["loc"])) or "cuerpo",
-             "mensaje": _MSG.get(x["type"], x["msg"].removeprefix("Value error, "))} for x in errores])
+        if any(
+            x["type"].endswith("_type") or x["type"] in ("extra_forbidden", "bool_type", "int_type") for x in errores
+        ):
+            raise peticion_invalida(
+                "Tipo de dato incorrecto o campo desconocido: "
+                + ", ".join(".".join(map(str, x["loc"])) for x in errores)
+            )
+        detalle = []
+        for x in errores:
+            campo = ".".join(map(str, x["loc"])) or "cuerpo"
+            if x["type"] == "missing" and campo in MENSAJES_OBLIGATORIO:
+                mensaje = MENSAJES_OBLIGATORIO[campo]
+            else:
+                mensaje = _MSG.get(x["type"], x["msg"].removeprefix("Value error, "))
+            detalle.append({"campo": campo, "mensaje": mensaje})
+        raise ApiError(422, "VALIDACION", detalle[0]["mensaje"] if len(detalle) == 1 else "Datos inválidos", detalle)
 
 
 def no_vacio(valor: Optional[str], campo: str) -> str:
@@ -239,15 +347,3 @@ def no_vacio(valor: Optional[str], campo: str) -> str:
 class Credenciales(Base):
     correo: str
     password: str
-
-
-class Registro(Base):
-    """Auto-registro de un Residente. NO acepta `rol`: extra="forbid" rechaza cualquier campo extra (400),
-    así nadie puede registrarse como Administracion."""
-    nombre: str
-    correo: str
-    password: str
-    unidadId: str
-    ocupacion: Ocupacion
-    v_correo = field_validator("correo")(_email)
-    v_uuid = field_validator("unidadId")(_uuid)

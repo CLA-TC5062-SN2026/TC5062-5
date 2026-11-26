@@ -1,15 +1,27 @@
 """Padrón y catálogo: unidades, áreas comunes, categorías y parámetros (RF-01, RD-01, RF-27)."""
-import sqlite3
-from typing import Any, Literal, Optional
 
-from fastapi import APIRouter, Body, Depends, Header, Path, Query
+from typing import Any, Optional
+
+from fastapi import APIRouter, Body, Depends, Header, Path
 
 from .. import schemas as S
 from ..db import get_db, tx
-from ..serial import AREA_SQL, UNIT_SQL, area_out, parameter_out, unit_out, b
-from ..util import (UUID_RE, ApiError, es_administrador, new_id, no_encontrado, now_utc, out_dt, pagina,
-                    paginacion, prohibido, responder, validacion, verificar_if_match, compactar)
-from ..security import actor
+from ..serial import AREA_SQL, UNIT_SQL, area_out, parameter_out, unit_out
+from ..util import (
+    UUID_RE,
+    es_administrador,
+    new_id,
+    no_encontrado,
+    now_utc,
+    out_dt,
+    pagina,
+    paginacion,
+    prohibido,
+    responder,
+    validacion,
+    verificar_if_match,
+)
+from ..security import UsuarioSesion, actor
 
 router = APIRouter()
 UnitId = Path(..., pattern=UUID_RE)
@@ -24,14 +36,17 @@ def _unit(db, unit_id):
 
 
 @router.get("/units")
-def list_units(torre: Optional[str] = None, activa: Optional[bool] = None, db=Depends(get_db),
-               pg=Depends(paginacion)):
+def list_units(torre: Optional[str] = None, activa: Optional[bool] = None, db=Depends(get_db), pg=Depends(paginacion)):
     where, params = [], []
     if torre is not None:
-        where.append("u.torre = ? COLLATE NOCASE"); params.append(torre)
+        where.append("u.torre = ? COLLATE NOCASE")
+        params.append(torre)
     if activa is not None:
-        where.append("b.activa = ?"); params.append(int(activa))
-    sql_from = "FROM unidad u JOIN ubicacion b ON b.id = u.ubicacion_id" + (" WHERE " + " AND ".join(where) if where else "")
+        where.append("b.activa = ?")
+        params.append(int(activa))
+    sql_from = "FROM unidad u JOIN ubicacion b ON b.id = u.ubicacion_id" + (
+        " WHERE " + " AND ".join(where) if where else ""
+    )
     sel = """u.ubicacion_id AS id, u.torre, u.piso, u.numero, u.propietario_nombre, u.propietario_correo,
              u.propietario_vive_en_condominio, b.activa"""
     return responder(pagina(db, sql_from, params, sel, "u.torre, u.piso, u.numero", pg, unit_out))
@@ -47,10 +62,19 @@ def create_unit(body: Any = Body(...), db=Depends(get_db)):
     uid = new_id()
     with tx(db):
         db.execute("INSERT INTO ubicacion (id, tipo, activa) VALUES (?, 'Unidad', 1)", (uid,))
-        db.execute("""INSERT INTO unidad (ubicacion_id, torre, piso, numero, propietario_nombre, propietario_correo,
+        db.execute(
+            """INSERT INTO unidad (ubicacion_id, torre, piso, numero, propietario_nombre, propietario_correo,
                       propietario_vive_en_condominio) VALUES (?,?,?,?,?,?,?)""",
-                   (uid, torre, d.piso, numero, d.propietario.nombre.strip(), d.propietario.correo,
-                    int(d.propietario.viveEnCondominio)))
+            (
+                uid,
+                torre,
+                d.piso,
+                numero,
+                d.propietario.nombre.strip(),
+                d.propietario.correo,
+                int(d.propietario.viveEnCondominio),
+            ),
+        )
     return responder(unit_out(_unit(db, uid)), 201, f"/units/{uid}", etag=True)
 
 
@@ -81,12 +105,16 @@ def update_unit(unitId: str = UnitId, body: Any = Body(...), if_match: str = Hea
                 raise validacion(f"propietario.{k}", "No admite null")
             prop[k] = v
     S.no_vacio(prop["nombre"], "propietario.nombre")
-    if db.execute("SELECT 1 FROM unidad WHERE torre=? AND numero=? AND ubicacion_id<>?", (torre, numero, unitId)).fetchone():
+    if db.execute(
+        "SELECT 1 FROM unidad WHERE torre=? AND numero=? AND ubicacion_id<>?", (torre, numero, unitId)
+    ).fetchone():
         raise validacion("numero", "Ya existe una unidad con esa torre y número")
     with tx(db):
-        db.execute("""UPDATE unidad SET torre=?, piso=?, numero=?, propietario_nombre=?, propietario_correo=?,
+        db.execute(
+            """UPDATE unidad SET torre=?, piso=?, numero=?, propietario_nombre=?, propietario_correo=?,
                       propietario_vive_en_condominio=? WHERE ubicacion_id=?""",
-                   (torre, piso, numero, prop["nombre"].strip(), prop["correo"], int(prop["viveEnCondominio"]), unitId))
+            (torre, piso, numero, prop["nombre"].strip(), prop["correo"], int(prop["viveEnCondominio"]), unitId),
+        )
         if "activa" in campos:
             db.execute("UPDATE ubicacion SET activa=? WHERE id=?", (int(d.activa), unitId))
     return responder(unit_out(_unit(db, unitId)), etag=True)
@@ -104,7 +132,8 @@ def _area(db, area_id):
 def list_common_areas(activa: Optional[bool] = None, db=Depends(get_db)):
     sql, params = AREA_SQL, []
     if activa is not None:
-        sql += " WHERE b.activa = ?"; params.append(int(activa))
+        sql += " WHERE b.activa = ?"
+        params.append(int(activa))
     return responder([area_out(r) for r in db.execute(sql + " ORDER BY a.nombre", params).fetchall()])
 
 
@@ -127,8 +156,9 @@ def get_common_area(areaId: str = Path(..., pattern=UUID_RE), db=Depends(get_db)
 
 
 @router.patch("/common-areas/{areaId}")
-def update_common_area(areaId: str = Path(..., pattern=UUID_RE), body: Any = Body(...),
-                       if_match: str = Header(...), db=Depends(get_db)):
+def update_common_area(
+    areaId: str = Path(..., pattern=UUID_RE), body: Any = Body(...), if_match: str = Header(...), db=Depends(get_db)
+):
     actual = area_out(_area(db, areaId))
     verificar_if_match(if_match, actual)
     d = S.parsear(S.CommonAreaUpdate, body)
@@ -151,9 +181,17 @@ def update_common_area(areaId: str = Path(..., pattern=UUID_RE), body: Any = Bod
 def list_categories(db=Depends(get_db)):
     out = []
     for c in db.execute("SELECT * FROM categoria ORDER BY rowid").fetchall():
-        subs = db.execute("SELECT nombre, prioridad_sugerida FROM subtipo WHERE categoria_id=? ORDER BY rowid", (c["id"],)).fetchall()
-        out.append({"id": c["id"], "nombre": c["nombre"], "prioridadSugerida": c["prioridad_sugerida"],
-                    "subtipos": [{"nombre": s["nombre"], "prioridadSugerida": s["prioridad_sugerida"]} for s in subs]})
+        subs = db.execute(
+            "SELECT nombre, prioridad_sugerida FROM subtipo WHERE categoria_id=? ORDER BY rowid", (c["id"],)
+        ).fetchall()
+        out.append(
+            {
+                "id": c["id"],
+                "nombre": c["nombre"],
+                "prioridadSugerida": c["prioridad_sugerida"],
+                "subtipos": [{"nombre": s["nombre"], "prioridadSugerida": s["prioridad_sugerida"]} for s in subs],
+            }
+        )
     return responder(out)
 
 
@@ -164,19 +202,22 @@ def list_parameters(db=Depends(get_db)):
 
 
 @router.put("/parameters/{clave}")
-def update_parameter(clave: str, body: Any = Body(...), db=Depends(get_db), quien=Depends(actor)):
+def update_parameter(clave: str, body: Any = Body(...), db=Depends(get_db), quien: UsuarioSesion = Depends(actor)):
     p = db.execute("SELECT * FROM parametro WHERE clave=?", (clave,)).fetchone()
     if not p:
         raise no_encontrado("Parámetro no encontrado")
-    if not es_administrador(db, quien["id"]):
+    if not es_administrador(db, quien.id):
         raise prohibido("Solo el Administrador modifica parámetros")
     d = S.parsear(S.ParameterUpdate, body)
     if d.valor <= 0:
         raise validacion("valor", "El valor debe ser mayor que cero")
     with tx(db):
         db.execute("UPDATE parametro SET valor=? WHERE clave=?", (d.valor, clave))
-        db.execute("""INSERT INTO cambio_parametro (clave, valor_anterior, valor_nuevo, fecha, modificado_por)
-                      VALUES (?,?,?,?,?)""", (clave, p["valor"], d.valor, now_utc(), quien["id"]))
+        db.execute(
+            """INSERT INTO cambio_parametro (clave, valor_anterior, valor_nuevo, fecha, modificado_por)
+                      VALUES (?,?,?,?,?)""",
+            (clave, p["valor"], d.valor, now_utc(), quien.id),
+        )
     return responder(parameter_out(db.execute("SELECT * FROM parametro WHERE clave=?", (clave,)).fetchone()))
 
 
@@ -184,7 +225,20 @@ def update_parameter(clave: str, body: Any = Body(...), db=Depends(get_db), quie
 def list_parameter_changes(clave: str, db=Depends(get_db)):
     if not db.execute("SELECT 1 FROM parametro WHERE clave=?", (clave,)).fetchone():
         raise no_encontrado("Parámetro no encontrado")
-    filas = db.execute("""SELECT c.*, u.nombre AS usuario FROM cambio_parametro c JOIN usuario u ON u.id = c.modificado_por
-                          WHERE c.clave=? ORDER BY c.id DESC""", (clave,)).fetchall()
-    return responder([{"clave": f["clave"], "valorAnterior": f["valor_anterior"], "valorNuevo": f["valor_nuevo"],
-                       "usuario": f["usuario"], "fecha": out_dt(f["fecha"])} for f in filas])
+    filas = db.execute(
+        """SELECT c.*, u.nombre AS usuario FROM cambio_parametro c JOIN usuario u ON u.id = c.modificado_por
+                          WHERE c.clave=? ORDER BY c.id DESC""",
+        (clave,),
+    ).fetchall()
+    return responder(
+        [
+            {
+                "clave": f["clave"],
+                "valorAnterior": f["valor_anterior"],
+                "valorNuevo": f["valor_nuevo"],
+                "usuario": f["usuario"],
+                "fecha": out_dt(f["fecha"]),
+            }
+            for f in filas
+        ]
+    )

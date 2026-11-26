@@ -19,3 +19,10 @@ export function borrarSesion() {
 }
 
 export const leerToken = () => leerSesion()?.token ?? null
+
+// RNF-06: el backend devuelve un token nuevo en cada respuesta; el plazo de 30 min corre desde la última actividad.
+export function renovarToken(token) {
+  const s = leerSesion()
+  if (!s) return
+  guardarSesion({ ...s, token, expiraEn: Date.now() + 30 * 60 * 1000 })
+}

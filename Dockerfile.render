@@ -1,0 +1,30 @@
+# Imagen de un solo contenedor para Render (plan gratuito): el API de FastAPI sirve también la SPA compilada.
+# El despliegue con dominio propio, HTTPS de Caddy y datos persistentes es docker-compose.yml (ver README).
+FROM node:22-slim AS frontend
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+FROM python:3.13-slim
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DATABASE_PATH=/data/reportaya.db \
+    UPLOAD_DIR=/data/uploads \
+    CORREO_BANDEJA_DIR=/data/correos \
+    FRONTEND_DIST=/app/static
+WORKDIR /app
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY backend/app ./app
+COPY backend/db ./db
+COPY backend/scripts ./scripts
+COPY backend/openapi_equipo.yaml ./
+COPY --from=frontend /frontend/dist ./static
+COPY render-entrypoint.sh /usr/local/bin/
+RUN useradd --create-home --uid 1000 reportaya && mkdir -p /data && chown reportaya /data \
+    && chmod +x /usr/local/bin/render-entrypoint.sh
+USER reportaya
+EXPOSE 10000
+ENTRYPOINT ["render-entrypoint.sh"]

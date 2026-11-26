@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
+import { ROLES } from '../lib/etiquetas.js'
 
 // enlaces: [{ to, label, roles? }] — sin `roles`, el enlace lo ve cualquier usuario autenticado.
-export default function Navbar({ marca = 'ReportaYa', enlaces = [], usuario, onLogout }) {
+export default function Navbar({ marca = 'ReportaYa', enlaces = [], usuario, onLogout, extra = null }) {
   const [abierto, setAbierto] = useState(false)
   const visibles = enlaces.filter((e) => !e.roles || e.roles.includes(usuario?.rol))
   const cerrar = () => setAbierto(false)
@@ -11,6 +12,8 @@ export default function Navbar({ marca = 'ReportaYa', enlaces = [], usuario, onL
     <nav aria-label="Principal" className="bg-blue-700 text-white [&_a]:rounded [&_a]:focus-visible:outline-2 [&_a]:focus-visible:outline-offset-2 [&_a]:focus-visible:outline-white">
       <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between px-4 py-3">
         <Link to="/" className="text-lg font-bold" onClick={cerrar}>{marca}</Link>
+        {/* `extra` (p. ej. envíos sin conexión) queda visible también en celular, fuera del menú plegable. */}
+        {extra && <span className="ml-auto mr-3 md:order-last md:ml-6 md:mr-0">{extra}</span>}
         <button
           className="rounded md:hidden focus-visible:outline-2 focus-visible:outline-white"
           onClick={() => setAbierto(!abierto)}
@@ -26,7 +29,7 @@ export default function Navbar({ marca = 'ReportaYa', enlaces = [], usuario, onL
           {usuario ? (
             <>
               {visibles.map((e) => <Link key={e.to} to={e.to} onClick={cerrar}>{e.label}</Link>)}
-              <span className="text-sm text-blue-50">{usuario.nombre} · {usuario.rol}</span>
+              <span className="text-sm text-blue-50">{usuario.nombre} · {ROLES[usuario.rol] ?? usuario.rol}</span>
               <button onClick={() => { cerrar(); onLogout() }} className="rounded bg-white px-3 py-1 text-blue-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white">Salir</button>
             </>
           ) : (

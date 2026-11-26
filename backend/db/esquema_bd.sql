@@ -469,9 +469,24 @@ CREATE TABLE envio_correo (
     estado               TEXT NOT NULL DEFAULT 'Pendiente' CHECK (estado IN ('Pendiente','Enviado','Fallido')),
     intentos             INTEGER NOT NULL DEFAULT 0 CHECK (intentos BETWEEN 0 AND 3),
     fecha_ultimo_intento TEXT,                                        -- {interno}
+    asunto               TEXT NOT NULL DEFAULT '',                    -- {interno} contenido que se reintenta (S11)
+    cuerpo               TEXT NOT NULL DEFAULT '',                    -- {interno}
     FOREIGN KEY (aviso_id, tipo) REFERENCES aviso (id, tipo),
     CHECK (fecha_ultimo_intento IS NULL OR (fecha_ultimo_intento GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-5][0-9]Z' AND julianday(fecha_ultimo_intento) IS NOT NULL)),
     CHECK (estado <> 'Enviado' OR (intentos >= 1 AND fecha_ultimo_intento IS NOT NULL))
+);
+
+-- Idempotencia de los POST que reintenta la PWA sin conexión (RNF-11, encabezado Idempotency-Key) ---
+CREATE TABLE idempotencia (
+    usuario_id TEXT NOT NULL REFERENCES usuario (id),
+    clave      TEXT NOT NULL CHECK (length(clave) BETWEEN 8 AND 200),
+    ruta       TEXT NOT NULL,
+    estado     TEXT NOT NULL DEFAULT 'EnCurso' CHECK (estado IN ('EnCurso','Hecha')),
+    status     INTEGER,
+    cuerpo     TEXT,
+    location   TEXT,
+    fecha      TEXT NOT NULL,
+    PRIMARY KEY (usuario_id, clave)
 );
 
 -- =====================================================================

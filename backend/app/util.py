@@ -1,4 +1,5 @@
 """Utilidades comunes: errores del contrato (esquema Error), fechas, ETag, paginación."""
+
 import hashlib
 import json
 import re
@@ -9,7 +10,7 @@ from typing import Any
 from fastapi import Query
 from fastapi.responses import JSONResponse
 
-from . import config
+from . import config, reloj
 
 UUID_RE = r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 FOLIO_RE = r"^RY-\d{6}$"
@@ -31,7 +32,7 @@ def prohibido(msg: str = "No tiene permiso para esta acción") -> ApiError:
     return ApiError(403, "PROHIBIDO", msg)
 
 
-def conflicto(msg: str, codigo: str = "TRANSICION_NO_PERMITIDA") -> ApiError:
+def conflicto(msg: str = "Transición no permitida", codigo: str = "TRANSICION_NO_PERMITIDA") -> ApiError:
     return ApiError(409, codigo, msg)
 
 
@@ -40,12 +41,14 @@ def peticion_invalida(msg: str = "La petición no es válida") -> ApiError:
 
 
 def validacion(campo: str, mensaje: str) -> ApiError:
-    return ApiError(422, "VALIDACION", "Datos inválidos", [{"campo": campo, "mensaje": mensaje}])
+    """422 con el mensaje del criterio de aceptación (SRS 3.0) y el nombre del campo."""
+    return ApiError(422, "VALIDACION", mensaje, [{"campo": campo, "mensaje": mensaje}])
 
 
 # ---------------------------------------------------------------- fechas
 def now_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    """Hora del sistema en UTC (texto de la BD). Sale de `reloj` para que las pruebas la fijen (RNF-10)."""
+    return reloj.a_texto(reloj.ahora())
 
 
 def to_utc(valor: str, campo: str) -> str:
@@ -57,6 +60,11 @@ def to_utc(valor: str, campo: str) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=config.TIMEZONE)
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def fecha_legible(valor: str) -> str:
+    """UTC de la BD -> «dd/mm/aaaa hh:mm» en la zona del condominio (formato de los mensajes del SRS, 1.3)."""
+    return reloj.de_texto(valor).astimezone(config.TIMEZONE).strftime("%d/%m/%Y %H:%M")
 
 
 def out_dt(valor: str | None) -> str | None:
@@ -72,7 +80,9 @@ def day_start_utc(d: date) -> str:
 
 
 def day_end_utc(d: date) -> str:
-    return datetime.combine(d, time(23, 59, 59), config.TIMEZONE).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return (
+        datetime.combine(d, time(23, 59, 59), config.TIMEZONE).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
 
 
 # ---------------------------------------------------------------- respuestas
@@ -81,9 +91,9 @@ def new_id() -> str:
 
 
 def compactar(obj: Any) -> Any:
-    """Quita las claves con valor None (los campos opcionales del API se omiten)."""
+    """Quita las claves con valor None (los campos opcionales del API se omiten) y las internas («_x»)."""
     if isinstance(obj, dict):
-        return {k: compactar(v) for k, v in obj.items() if v is not None}
+        return {k: compactar(v) for k, v in obj.items() if v is not None and not k.startswith("_")}
     if isinstance(obj, list):
         return [compactar(v) for v in obj]
     return obj
@@ -94,8 +104,9 @@ def etag_de(obj: Any) -> str:
     return '"' + hashlib.sha1(raw.encode()).hexdigest()[:32] + '"'
 
 
-def responder(data: Any, status: int = 200, location: str | None = None, etag: bool = False,
-              etag_de_recurso: Any = None) -> JSONResponse:
+def responder(
+    data: Any, status: int = 200, location: str | None = None, etag: bool = False, etag_de_recurso: Any = None
+) -> JSONResponse:
     """JSON de respuesta. `etag_de_recurso` permite calcular el ETag sobre el recurso aunque la
     respuesta lleve campos extra (p. ej. archivosRechazados en el alta de un reporte)."""
     data = compactar(data)
@@ -124,11 +135,17 @@ def paginacion(page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=10
 def pagina(db, sql_from: str, params: list, select: str, order: str, pg: tuple[int, int], mapper):
     page, size = pg
     total = db.execute(f"SELECT count(*) {sql_from}", params).fetchone()[0]
-    filas = db.execute(f"SELECT {select} {sql_from} ORDER BY {order} LIMIT ? OFFSET ?",
-                       params + [size, (page - 1) * size]).fetchall()
+    filas = db.execute(
+        f"SELECT {select} {sql_from} ORDER BY {order} LIMIT ? OFFSET ?", params + [size, (page - 1) * size]
+    ).fetchall()
     return {"items": [mapper(f) for f in filas], "pagination": {"page": page, "pageSize": size, "total": total}}
 
 
 def es_administrador(db, usuario_id: str) -> bool:
-    return db.execute("SELECT 1 FROM usuario_administracion WHERE usuario_id=? AND perfil_administracion='Administrador'",
-                      (usuario_id,)).fetchone() is not None
+    return (
+        db.execute(
+            "SELECT 1 FROM usuario_administracion WHERE usuario_id=? AND perfil_administracion='Administrador'",
+            (usuario_id,),
+        ).fetchone()
+        is not None
+    )

@@ -1,0 +1,10 @@
+# Desarrollo y pruebas: pip install -r requirements-dev.txt
+-r requirements.txt
+httpx>=0.27
+jsonschema>=4.20
+PyYAML>=6.0
+requests>=2.31
+pytest>=8.0
+moto[s3]>=5.0       # S3 simulado en las pruebas
+aiosmtpd>=1.4       # servidor SMTP de prueba
+flake8>=7.0         # análisis estático (setup.cfg)

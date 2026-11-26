@@ -1,4 +1,5 @@
 """Conexión a SQLite. Una conexión por petición, con las llaves foráneas activadas."""
+
 import sqlite3
 from contextlib import contextmanager
 

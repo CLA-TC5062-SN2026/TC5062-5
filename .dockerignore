@@ -1,0 +1,15 @@
+# Contexto de Dockerfile.render (raíz del repositorio)
+.git
+.github
+**/node_modules
+**/__pycache__
+**/.venv
+frontend/dist
+backend/.env
+backend/*.db
+backend/uploads
+backend/correos
+backend/respaldos
+docs
+S0*
+S1*

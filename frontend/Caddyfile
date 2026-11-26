@@ -1,0 +1,28 @@
+# Punto de entrada único (AR-5 de S05_S06_A1/arquitectura_equipo.md): HTTPS automático (RNF-06),
+# estáticos de la SPA y /api/v1 hacia el contenedor del API, en el mismo origen (sin CORS).
+{$DOMINIO:localhost} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# Fotos de 10 MB y video de 50 MB por petición (RF-05)
+	request_body {
+		max_size 70MB
+	}
+
+	@api path /api/v1/* /docs /docs/* /health
+	handle @api {
+		reverse_proxy api:8000
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

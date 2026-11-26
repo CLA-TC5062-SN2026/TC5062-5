@@ -1,0 +1,54 @@
+# Despliegue de ReportaYa: un servidor con Docker Compose.
+#   1. backend/.env con JWT_SECRET propio (ver backend/.env.example)
+#   2. DOMINIO=reportaya.su-dominio.mx docker compose up -d --build
+#   3. docker compose exec api python scripts/init_db.py --admin-correo admin@su-condominio.mx --admin-nombre "Nombre"
+# Detalle en el README («Despliegue»).
+services:
+  api:
+    build: ./backend
+    env_file: ./backend/.env
+    environment:
+      DATABASE_PATH: /data/reportaya.db
+      UPLOAD_DIR: /data/uploads
+      CORREO_BANDEJA_DIR: /data/correos
+      FRONTEND_URL: https://${DOMINIO:-localhost}
+    volumes:
+      - datos:/data
+    restart: unless-stopped
+
+  # Respaldo diario de la base y las fotos (RNF-14): uno al arrancar y luego cada 24 h, conserva 14.
+  # Restaurar: docker compose stop api && docker compose run --rm respaldo python scripts/respaldo.py restaurar /respaldos/AAAAMMDD-HHMMSS
+  respaldo:
+    build: ./backend
+    env_file: ./backend/.env
+    environment:
+      DATABASE_PATH: /data/reportaya.db
+      UPLOAD_DIR: /data/uploads
+      RESPALDO_DIR: /respaldos
+    command: ["python", "scripts/respaldo.py", "crear", "--cada", "24"]
+    volumes:
+      - datos:/data
+      - respaldos:/respaldos
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  web:
+    build: ./frontend
+    environment:
+      DOMINIO: ${DOMINIO:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  datos:        # base SQLite, fotos y correos simulados
+  respaldos:    # copias diarias; conviene copiarlas también fuera del servidor (ver README)
+  caddy_data:   # certificados TLS
+  caddy_config:

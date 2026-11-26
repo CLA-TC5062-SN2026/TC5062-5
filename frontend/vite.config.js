@@ -12,5 +12,11 @@ export default defineConfig(({ mode }) => {
         '/api/v1': env.VITE_BACKEND_URL || 'http://127.0.0.1:8000',
       },
     },
+    // `npm run preview` sirve la versión compilada (con service worker) y también reenvía el API.
+    preview: {
+      proxy: {
+        '/api/v1': env.VITE_BACKEND_URL || 'http://127.0.0.1:8000',
+      },
+    },
   }
 })

@@ -1,53 +1,39 @@
-# ReportaYa API — servicios CRUD con autenticación JWT
+# ReportaYa API (backend)
 
-Python 3.11+ · FastAPI · SQLite (`db/esquema_bd.sql`) · JWT (PyJWT) + bcrypt · control de acceso por rol.
-
-## Puesta en marcha
+FastAPI · SQLite (`db/esquema_bd.sql`) · JWT (PyJWT) + bcrypt · control de acceso por rol **y por registro** (matriz 2.3 del SRS).
+La instalación completa, las variables de entorno y las pruebas están en el [README de la raíz](../README.md).
 
 ```bash
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env                                   # Windows: copy .env.example .env
-#   y en .env ponga un JWT_SECRET propio: python -c "import secrets; print(secrets.token_urlsafe(48))"
-python scripts/init_db.py --reset --demo               # crea reportaya.db, catálogo RD-01 y datos de ejemplo
-python -m app.main                                     # o: uvicorn app.main:app --port 8000
+cp .env.example .env                                   # y ponga un JWT_SECRET propio
+python scripts/cargar_demo.py                          # datos de demostración (contraseña Demo1234!)
+uvicorn app.main:app --port 8000                       # documentación interactiva en /docs
+python -m pytest tests/test_reglas.py -q               # reglas de negocio (122 casos)
 ```
-
-- Verificar conexión a la BD: `GET http://127.0.0.1:8000/health` → `{"estado":"ok","tablas":33,"llavesForaneas":true}`
-  (33 = las 32 tablas del esquema + `sqlite_sequence` que crea SQLite por el AUTOINCREMENT).
-- Documentación interactiva: `http://127.0.0.1:8000/docs`.
-- Pruebas de contrato (con el servidor corriendo y una BD recién creada con `--reset --demo`):
-  `python tests/test_contrato.py`
-
-## Autenticación (S05-S06-A2)
-
-- `POST /api/v1/auth/register` (público, crea un Residente) · `POST /api/v1/auth/login` (público, devuelve el JWT) ·
-  `GET /api/v1/auth/me` (con token).
-- Todas las rutas CRUD exigen `Authorization: Bearer <token>` (401 sin token o con token inválido/vencido) y un rol
-  autorizado según `x-roles` del `openapi_equipo.yaml` (403). Tabla de permisos: `app/security.py`.
-- `init_db.py --demo` crea un usuario por rol (`admin`, `auxiliar`, `vigilancia`, `mantenimiento`, `residente`
-  `@reportaya.demo`) con contraseña `Demo1234!`.
-- Revisión de seguridad y pruebas: `../S05_S06_A2/revision_seguridad.md`.
 
 ## Estructura
 
 ```
-app/main.py            aplicación, manejo de errores (esquema Error), /health, dónde se aplica la seguridad
-app/security.py        bcrypt, JWT, middleware (usuario_actual, autorizar) y tabla de permisos por rol
-app/config.py db.py    variables de entorno (.env) y conexión SQLite (PRAGMA foreign_keys=ON)
-app/util.py            errores, fechas (BD en UTC, API en la zona del condominio), ETag/If-Match, paginación
-app/schemas.py         validación de cuerpos (derivada de los schemas del YAML)
-app/serial.py          filas -> JSON con los nombres de campo del YAML
-app/routers/           auth (register, login, me) · catalogo (unidades, áreas, categorías, parámetros) · usuarios (usuarios, vinculaciones,
-                       responsables, proveedores, delegaciones) · reportes · avisos
-scripts/init_db.py     crea la BD y carga el catálogo
-tests/test_contrato.py compara rutas/códigos/schemas contra openapi_equipo.yaml
+app/main.py             aplicación, manejo de errores (esquema Error), /health, tarea periódica, token renovado
+app/security.py         bcrypt, JWT, usuario_actual, autorizar y tabla de permisos por rol (x-roles del YAML)
+app/visibilidad.py      matriz de visibilidad 2.3: qué reportes, campos, archivos e historial ve cada rol (RNF-05)
+app/reglas.py           transiciones permitidas (RF-07), historial, parámetros (RF-27), gestión y delegación (RF-21)
+app/notificaciones.py   avisos de RF-11 (sistema y correo), reintentos y reportes estancados (RF-22)
+app/correo.py           interfaz ServicioCorreo y CorreoSimulado (archivos .txt en CORREO_BANDEJA_DIR)
+app/cuentas.py          enlaces de activación y recuperación de un solo uso (RF-14), solo se guarda su hash
+app/reloj.py            hora del sistema que las pruebas pueden fijar (RNF-10)
+app/util.py schemas.py serial.py config.py db.py   errores, validación, serialización, configuración y conexión
+app/routers/            auth (login, me, activación, recuperación) · catalogo · usuarios · reportes (alta, consulta,
+                        corrección, notas, visita, detenciones, costos, persistencia) · flujo (asignación,
+                        reclasificación, ciclos, terminado, confirmación, cierre, cancelación, reapertura,
+                        duplicados, garantía) · archivos · metricas (tablero y PDF) · avisos
+scripts/init_db.py      crea la base y el catálogo RD-01; --demo (datos de la prueba de contrato); --admin-correo
+                        (comando de arranque del primer Administrador, RF-14-AC-4)
+scripts/cargar_demo.py  condominio de demostración creado con el flujo real del API
+tests/                  test_reglas.py + conftest.py (pytest, en proceso) · test_contrato.py (contra el servidor)
+openapi_equipo.yaml     contrato vivo v1.1.0 (cambios respecto a la 1.0.0 en info.description)
 ```
 
-## Alcance
-
-46 de las 69 operaciones del YAML (todo el CRUD de las entidades principales). Quedan fuera, por pertenecer a
-seguridad o a las reglas de negocio de la siguiente actividad: sesiones, activaciones y recuperación de contraseña;
-transiciones de estado (`assignments`, `classification`, `cycles`, `completions`, `resident-responses`, `closures`,
-`reopenings`, `cancellations`, `merges`, `duplicate-flag`); archivos descargables y compartidos; `warranty`; `metrics`.
-Detalle y divergencias conocidas: sección «Correcciones al código generado» de `revision_sql.md`.
+Alcance: las 68 operaciones del contrato v1.1.0. Ya no existe `POST /auth/register`: toda cuenta la crea la
+Administración (RF-02, EX-08).

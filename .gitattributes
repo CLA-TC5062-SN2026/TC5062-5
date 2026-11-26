@@ -1,0 +1,2 @@
+# Los scripts de arranque de los contenedores necesitan fin de línea LF aunque se suban desde Windows.
+*.sh text eol=lf

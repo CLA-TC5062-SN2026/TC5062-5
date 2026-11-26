@@ -1,0 +1,20 @@
+# Blueprint de Render: un servicio web gratuito con la demo de ReportaYa.
+# Render > New > Blueprint > este repositorio. JWT_SECRET se genera solo.
+# Plan gratuito: el servicio se duerme tras 15 min sin uso (el primer acceso tarda ~1 min) y su disco no
+# persiste, por eso la demo se vuelve a cargar en cada arranque. Para datos reales: docker-compose.yml.
+services:
+  - type: web
+    name: reportaya
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile.render
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DEMO_AL_INICIAR
+        value: "1"
+      - key: CORREO_MODO
+        value: simulado

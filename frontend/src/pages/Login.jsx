@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Navigate, useLocation, useNavigate } from 'react-router-dom'
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import Alerta from '../components/Alerta.jsx'
 import Button from '../components/Button.jsx'
 import Card from '../components/Card.jsx'
@@ -48,6 +48,8 @@ export default function Login() {
           <Button type="submit" cargando={cargando}>Entrar</Button>
         </form>
       </Card>
+      <p className="mt-4 text-center"><Link to="/recuperar" className="text-blue-700 underline">¿Olvidaste tu contraseña?</Link></p>
+      <p className="mt-2 text-center text-sm text-slate-600">Las cuentas las crea la Administración del condominio.</p>
     </main>
   )
 }
